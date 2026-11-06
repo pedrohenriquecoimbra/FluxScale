@@ -44,6 +44,7 @@ dependencies = [
 [project.optional-dependencies]
 cwt = ["pycwt"]
 fcwt = ["pycwt", "fcwt"]
+cascade = ["zarr"]
 
 [project.scripts]
 waveletEC-eddypro_run = "waveletec.main:eddypro_run"

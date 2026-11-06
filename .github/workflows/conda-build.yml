@@ -55,7 +55,11 @@ jobs:
           activate-environment: test
 
       - name: Install package and test deps
-        run: pip install . pytest
+        # `.[cascade]` pulls zarr so the coefficient-store tests run too
+        run: pip install ".[cascade]" pytest
+
+      - name: Verify zarr imports (cascade tests must not silently skip)
+        run: python -c "import zarr; print('zarr', zarr.__version__)"
 
       - name: Run tests
         run: pytest -v tests
