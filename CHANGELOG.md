@@ -5,6 +5,23 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0:
 breaking changes bump the minor version).
 
+## [Unreleased]
+
+### Added
+
+- `waveletec.sonify` (`waveletec.extra.sonification`) turns any variable into
+  sound at three levels: 0, the signal as an audio file; 1, the signal altered
+  for human hearing (wavelet scales expanded into the hearing range, equalised
+  and weighted for equal loudness); 2, music, in which a flux such as `w*co2` is
+  a duet of two instruments whose covariance is heard as harmony. Instruments
+  are chosen from `INSTRUMENTS`, `loudness_range` keeps calm passages softer but
+  audible, and `stems=True` returns one track per wavelet scale. Experimental:
+  the API may still change. Uses only existing dependencies.
+- `waveletec.decompose`: a signal or flux split into wavelet scales, as a Dataset.
+- `waveletec.export_midi` writes the same composition as MIDI, for a DAW. Needs
+  the new `midi` extra.
+- `waveletEC-sonify` command-line entry point, for `.wav` and `.mid` output.
+
 ## [0.5.0] - 2026-06-04
 
 ### Removed (breaking)

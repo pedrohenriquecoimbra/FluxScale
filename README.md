@@ -85,6 +85,67 @@ If you're using ```waveletec.process```, just pass the ```output_folderpath``` p
 Prefer using ```waveletec.data_run```? No problem! Pass the ```dst``` parameter (a single output file) like this: ```waveletec.data_run(data, ..., dst='PATH/TO/OUTPUT.nc')```.
 
 
+### Listening to the Data
+
+Any variable can be turned into sound with ```waveletec.sonify```, at one of three levels. This part of the library is experimental: its API may still change.
+
+| Level | | What it does |
+| --- | --- | --- |
+| 0 | Audio file | The signal itself, written as audio: one data sample per audio sample. |
+| 1 | Audible | The same signal altered for human hearing: its wavelet scales are expanded into the hearing range, equalised and weighted for equal loudness. Every sound is still a piece of the data. |
+| 2 | Music (default) | Each wavelet scale drives a voice on a consonant scale, and the value of the variable plays a melody over it. A flux is a duet. |
+
+```python
+import waveletec
+
+waveletec.sonify(data, "co2", level=0, dst="co2_L0.wav")
+waveletec.sonify(data, "co2", level=1, dst="co2_L1.wav")
+waveletec.sonify(data, "co2", dst="co2_L2.wav")
+waveletec.sonify(data, "w*co2", duration=60, dst="flux.wav")
+waveletec.sonify(data, "w*co2", instruments=("cello", "marimba"), dst="flux.wav")
+
+stems = waveletec.sonify(data, "co2", stems=True)    # one track per wavelet scale, summing to the mix
+split = waveletec.decompose(data, "w*co2", fs=20)    # the scales themselves, as a Dataset
+waveletec.export_midi(data, "w*co2", "flux.mid")     # the same music for a DAW (pip install "waveletec[midi]")
+```
+
+```data``` can be an array, a ```pandas.Series``` or an ```xarray.DataArray```, or a Dataset, DataFrame or dictionary holding the variable. Products such as ```"w*co2"``` and wavelet-domain outputs of ```data_run``` such as ```"wco2-wh2o+"``` work too.
+
+Why level 1 is needed: speed and pitch are tied together in a waveform. Playing half an hour of the FR-Gri sample in 30 s leaves only 3% (```h2o```) to 46% (```w```) of its variance audible. Wavelets untie them, so that scales can be moved into the hearing range without changing how fast time runs.
+
+A flux is the covariance between two variables, so at level 2 it is played by two instruments, one per variable, each following its own value. What you hear between them is the flux:
+
+| You hear | It means |
+| --- | --- |
+| Two instruments (flute and bell by default) | The first and the second variable (e.g. ```w``` and ```co2```) |
+| Moving together, or in opposite directions | Positive or negative covariance |
+| Sweet intervals, or looser ones with seconds and sevenths | Strong local correlation, or none |
+| Voices swelling underneath | The flux at each wavelet scale, low notes for large eddies |
+| Lowest note: major or relative minor | Upward or downward flux |
+
+For a day of ```w*co2``` at FR-Gri, the instruments drift apart at night, then lock into consonant contrary motion in a minor key from mid-morning to late afternoon, as photosynthesis takes CO2 down.
+
+Instruments are chosen by name from ```waveletec.extra.sonification.INSTRUMENTS```, one per variable: held ones (flute, clarinet, oboe, bassoon, saxophone, horn, trumpet, trombone, violin, viola, cello, double_bass, voice, organ, accordion) and struck or plucked ones (bell, piano, harp, harpsichord, guitar, electric_guitar, bass_guitar, pizzicato, marimba, vibraphone, glockenspiel, celesta, timpani, kalimba). They are simple synthesised sketches, not recordings. In a duet, one of each kind is easiest to tell apart.
+
+Gaps in the data are silent. Over a long record, calm passages stay softer than turbulent ones, but by no more than ```loudness_range``` (6 LU by default, ```None``` keeps the full swing), so that a quiet night remains audible. The same data and seed always give the same sound. Other options are ```duration```, ```scale```, ```root```, ```loudness``` and ```seed``` (see ```help(waveletec.sonify)```); the result is an ```xarray.DataArray``` whose ```attrs``` record the mapping. In a notebook:
+
+```python
+from IPython.display import Audio
+
+audio = waveletec.sonify(data, "w*co2")
+Audio(audio.values.T, rate=audio.attrs["sample_rate"], normalize=False)
+```
+
+Or from the command line:
+
+```bash
+waveletEC-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
+waveletEC-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.mid
+```
+
+The instruments are simple sketches. For real ones, take the composition to Reaper, Ableton or MuseScore: ```export_midi``` writes one track per melody line and per wavelet scale, named like the stems of ```sonify(..., stems=True)```, so the two line up.
+
+
 ### Output Format
 
 The output file for the wavelet-based (co)spectra analysis is structured as follows:

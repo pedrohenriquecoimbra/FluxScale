@@ -3,10 +3,15 @@ import os
 import logging
 import datetime
 import argparse
+import glob
 # 3rd party modules
+import xarray as xr
 # Project modules
 from .extra import eddypro as eddypro
+from .extra import midi as sound_midi
+from .extra import sonification
 from .core import handlers
+from .io import READERS
 
 
 logger = logging.getLogger(__name__)
@@ -300,6 +305,44 @@ def partition():
     dst_path = args.dst_path or os.path.join(args.folder, '00000_partition.nc')
     data.to_netcdf(dst_path)
     return
+
+
+def sonify():
+    # waveletEC-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
+    parser = argparse.ArgumentParser(
+        description="Turn a variable into sound, or into MIDI if the output ends in .mid. "
+                    "Other `sonify` or `export_midi` arguments can be passed as `--key value` "
+                    "(e.g. `--instruments cello marimba`).")
+    parser.add_argument('-i', '--input_path', type=str, nargs='+', required=True,
+                        help='Input file(s), in time order; patterns such as "level_6/20220513*" are expanded')
+    parser.add_argument('-v', '--variable', type=str, required=True,
+                        help='Variable, or a product played as a duet (e.g., "co2", "w*co2")')
+    parser.add_argument('-o', '--output', type=str, required=True,
+                        help='Path of the .wav or .mid file to write')
+    parser.add_argument('-l', '--level', type=int, default=2, choices=[0, 1, 2],
+                        help='0 audio file, 1 audible, 2 music (default: 2)')
+    parser.add_argument('-d', '--duration', type=float, default=None,
+                        help='Seconds of sound (default: 30; at level 0, one audio sample per data sample)')
+    parser.add_argument('-af', '--acquisition_frequency', type=float, default=None,
+                        help='Data acquisition frequency in Hz; only labels the output')
+    parser.add_argument('--reader', type=str, default='ep_raw_lvl',
+                        help='Reader for the input files (default: "ep_raw_lvl")')
+    _add_common_args(parser)
+    args, custom_params = _finalize(parser)
+    midi = args.output.lower().endswith(('.mid', '.midi'))
+    if midi and args.level != 2:
+        parser.error("MIDI holds the notes of level 2: drop --level or write a .wav file.")
+
+    paths = sorted(p for pattern in args.input_path for p in glob.glob(pattern))
+    if not paths:
+        raise FileNotFoundError(f"No file matches {args.input_path}.")
+    data = xr.concat([READERS.get(args.reader)(p) for p in paths], dim='TIMESTAMP')
+    if midi:
+        sound_midi.export_midi(data, args.variable, args.output, duration=args.duration,
+                               fs=args.acquisition_frequency, **custom_params)
+    else:
+        sonification.sonify(data, args.variable, level=args.level, duration=args.duration,
+                            fs=args.acquisition_frequency, dst=args.output, **custom_params)
 
 
 def run():

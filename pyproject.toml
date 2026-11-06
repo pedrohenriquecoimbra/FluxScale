@@ -44,12 +44,14 @@ dependencies = [
 [project.optional-dependencies]
 cwt = ["pycwt"]
 fcwt = ["pycwt", "fcwt"]
+midi = ["mido>=1.3"]
 
 [project.scripts]
 waveletEC-eddypro_run = "waveletec.main:eddypro_run"
 waveletEC-partition = "waveletec.main:partition"
 waveletEC-integrate = "waveletec.main:integrate"
 waveletEC-exec = "waveletec.main:run"
+waveletEC-sonify = "waveletec.main:sonify"
 waveletEC = "waveletec.main:main"
 
 [project.urls]
