@@ -1,6 +1,6 @@
 """A composition as MIDI, to open in a DAW or a score editor.
 
-The instruments of :mod:`waveletec.extra.sonification` are sketches. A MIDI file keeps
+The instruments of :mod:`fluxscale.extra.sonification` are sketches. A MIDI file keeps
 the composition and leaves the sound to real ones. It holds the notes of level 2,
 on the clock of the audio and with tracks named like its stems, so that a wavelet
 scale can be reorchestrated or rewritten next to the stem it came from.
@@ -182,7 +182,7 @@ def export_midi(data, variable, dst, duration=None, fs=None, scale="pentatonic",
     become the nearest key, and pan, room and mastering stay in the stems.
 
     Args:
-        data: Anything :func:`waveletec.sonify` accepts.
+        data: Anything :func:`fluxscale.sonify` accepts.
         variable: Name of the variable, or a product such as ``"w*co2"``, played as
             a duet. ``None`` if *data* is a single series.
         dst: Path of the ``.mid`` file to write; missing folders are created.
@@ -196,7 +196,7 @@ def export_midi(data, variable, dst, duration=None, fs=None, scale="pentatonic",
             a duet.
         wavelet: Mother wavelet for the decomposition.
         correlation_window: Duet only. Seconds of data over which the local
-            correlation is judged, as in :func:`waveletec.sonify`.
+            correlation is judged, as in :func:`fluxscale.sonify`.
 
     Returns:
         The ``mido.MidiFile`` that was written. Its first track holds the name of
@@ -208,7 +208,7 @@ def export_midi(data, variable, dst, duration=None, fs=None, scale="pentatonic",
             instruments is wrong, or there are not enough finite values.
     """
     if mido is None:
-        raise ImportError('MIDI export needs mido: pip install "waveletec[midi]"')
+        raise ImportError('MIDI export needs mido: pip install "fluxscale[midi]"')
     _check_duration(duration)
     _check_correlation_window(correlation_window)
     ratios = _parse_scale(scale)

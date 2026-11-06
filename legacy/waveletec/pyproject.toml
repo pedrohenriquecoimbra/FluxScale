@@ -1,0 +1,26 @@
+# The last waveletec release: it installs fluxscale and keeps old code working.
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "waveletec"
+version = "0.6.0"
+description = "Renamed to fluxscale: this package installs it and keeps old imports working"
+readme = "README.md"
+license = { text = "EUPL-1.2" }
+requires-python = ">=3.8"
+dependencies = ["fluxscale>=0.6"]
+
+[project.scripts]
+waveletEC-eddypro_run = "fluxscale.main:eddypro_run"
+waveletEC-partition = "fluxscale.main:partition"
+waveletEC-integrate = "fluxscale.main:integrate"
+waveletEC-exec = "fluxscale.main:run"
+waveletEC = "fluxscale.main:main"
+
+[project.urls]
+Homepage = "https://pypi.org/project/fluxscale/"
+
+[tool.setuptools]
+packages = ["waveletec"]

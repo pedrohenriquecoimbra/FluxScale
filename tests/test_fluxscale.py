@@ -1,4 +1,4 @@
-"""Regression tests for the fixes applied to waveletec.
+"""Regression tests for the fixes applied to fluxscale.
 
 These cover the pure/cheap logic that previously crashed or silently
 misbehaved: formula parsing, CLI kwarg parsing, combination filtering, reader
@@ -11,12 +11,12 @@ import pandas as pd
 import pytest
 import xarray as xr
 
-from waveletec.core import wavelet_functions as wf
-from waveletec.core import commons
-from waveletec.core import handlers
-from waveletec.extra.partitioning import coimbra_et_al_2025 as co
-from waveletec.io import readers
-from waveletec import main as wmain
+from fluxscale.core import wavelet_functions as wf
+from fluxscale.core import commons
+from fluxscale.core import handlers
+from fluxscale.extra.partitioning import coimbra_et_al_2025 as co
+from fluxscale.io import readers
+from fluxscale import main as wmain
 
 
 # --------------------------------------------------------------------------- #

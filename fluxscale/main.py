@@ -237,7 +237,7 @@ def _finalize(parser):
 
 
 def eddypro_run():
-    # waveletEC-eddypro_run -p "input/EP/FR-Gri_sample.eddypro" -o "output/wavelet_flux/" -d "20220513T0000-20220516T0000" --processing_time_duration 3H
+    # fluxscale-eddypro_run -p "input/EP/FR-Gri_sample.eddypro" -o "output/wavelet_flux/" -d "20220513T0000-20220516T0000" --processing_time_duration 3H
     parser = argparse.ArgumentParser(description="Run wavelet-based edy covariance workflows.")
     parser.add_argument('-p', '--path',   type=str,
                         help='Path to EddyPro setup file')
@@ -308,7 +308,7 @@ def partition():
 
 
 def sonify():
-    # waveletEC-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
+    # fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
     parser = argparse.ArgumentParser(
         description="Turn a variable into sound, or into MIDI if the output ends in .mid. "
                     "Other `sonify` or `export_midi` arguments can be passed as `--key value` "

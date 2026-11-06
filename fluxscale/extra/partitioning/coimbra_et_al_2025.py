@@ -9,7 +9,7 @@ import xarray as xr
 import itertools
 
 # project modules
-from waveletec.core.addons import read_file
+from fluxscale.core.addons import read_file
 
 logger = logging.getLogger(__name__)
 

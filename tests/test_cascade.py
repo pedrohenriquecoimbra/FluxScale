@@ -1,6 +1,6 @@
 """Tests for the deconstructed (chunked) DWT cascade.
 
-The central claim of ``waveletec.core.cascade`` is exactness: decomposing a
+The central claim of ``fluxscale.core.cascade`` is exactness: decomposing a
 long record chunk by chunk (with overlap margins and periodized boundary
 handling), then continuing from the concatenated approximation, must
 reproduce -- to machine precision -- the coefficients ``pywt.wavedec`` would
@@ -16,7 +16,7 @@ import pytest
 import pywt
 import xarray as xr
 
-from waveletec.core import cascade
+from fluxscale.core import cascade
 
 WAVELET = 'db6'
 MODE = 'periodization'

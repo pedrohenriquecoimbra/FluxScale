@@ -1,6 +1,6 @@
 name: Conda build
 
-# Self-contained build/test/publish pipeline for waveletec.
+# Self-contained build/test/publish pipeline for fluxscale.
 # Replaces the previous delegation to openalea/action-build-publish-anaconda
 # (external org infrastructure) with this project's own steps:
 #   * test  - install the package via pip (so the PyPI-only `regorator`
@@ -91,14 +91,14 @@ jobs:
       - name: Resolve package version
         id: version
         run: |
-          # Canonical version lives in waveletec/version.py; a pushed tag
+          # Canonical version lives in fluxscale/version.py; a pushed tag
           # (vX.Y.Z) takes precedence so releases are labelled from the tag.
-          version=$(python -c "import re,pathlib;print(re.search(r'^version\s*=\s*[\"\x27]([^\"\x27]+)',pathlib.Path('waveletec/version.py').read_text(),re.M).group(1))")
+          version=$(python -c "import re,pathlib;print(re.search(r'^version\s*=\s*[\"\x27]([^\"\x27]+)',pathlib.Path('fluxscale/version.py').read_text(),re.M).group(1))")
           if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
             version="${GITHUB_REF#refs/tags/v}"
           fi
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "Building waveletec ${version}"
+          echo "Building fluxscale ${version}"
 
       - name: Build conda package
         env:
@@ -117,8 +117,8 @@ jobs:
       - name: Upload package artifact
         uses: actions/upload-artifact@v4
         with:
-          name: waveletec-conda-${{ steps.version.outputs.version }}
-          path: dist/conda/noarch/waveletec-*
+          name: fluxscale-conda-${{ steps.version.outputs.version }}
+          path: dist/conda/noarch/fluxscale-*
           if-no-files-found: error
 
       - name: Publish to Anaconda.org
@@ -127,4 +127,4 @@ jobs:
           ANACONDA_TOKEN: ${{ secrets.ANACONDA_TOKEN }}
         run: |
           anaconda --token "${ANACONDA_TOKEN}" upload --force \
-            dist/conda/noarch/waveletec-*
+            dist/conda/noarch/fluxscale-*

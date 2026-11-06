@@ -12,10 +12,10 @@ __all__ = ["decompose"]
 
 
 def decompose(data, variable=None, fs=None, wavelet="db6"):
-    """Split a variable into wavelet scales with waveletec.
+    """Split a variable into wavelet scales with fluxscale.
 
     Args:
-        data: Anything :func:`waveletec.sonify` accepts.
+        data: Anything :func:`fluxscale.sonify` accepts.
         variable: Name of the variable, or a product such as ``"w*co2"``, which
             gives the cross-scalogram: the flux density at each scale.
         fs: Sampling rate of the data (Hz).

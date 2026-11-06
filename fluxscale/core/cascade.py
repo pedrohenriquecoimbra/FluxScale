@@ -75,7 +75,7 @@ def _require_zarr():
         raise ImportError(
             "The cascade coefficient store requires `zarr`. "
             "Install it with `pip install zarr` "
-            "(or `pip install waveletec[cascade]`).")
+            "(or `pip install fluxscale[cascade]`).")
 
 
 # --------------------------------------------------------------------------- #
@@ -281,6 +281,11 @@ def _create_array(group, name, dtype, chunks=_ZARR_CHUNK):
     return group.create_dataset(name, **kwargs)  # zarr 2
 
 
+# Marks a store on disk. It keeps the package's old name: stores can hold years
+# of data, and changing it would stop them from opening.
+_STORE_MARK = 'waveletec_cascade'
+
+
 class CascadeStore:
     """
     Zarr-backed store of DWT coefficients: one group per variable, one 1D
@@ -376,7 +381,7 @@ class CascadeStore:
 
         root = zarr.open_group(path, mode='w' if overwrite else 'w-')
         root.attrs.update({
-            'waveletec_cascade': 1,
+            _STORE_MARK: 1,
             'wavelet': str(wavelet),
             'mode': MODE,
             'fs': float(fs),
@@ -404,8 +409,8 @@ class CascadeStore:
     def open(cls, path, mode='r+'):
         _require_zarr()
         root = zarr.open_group(path, mode=mode)
-        if not root.attrs.get('waveletec_cascade'):
-            raise ValueError(f"{path} is not a waveletec cascade store.")
+        if not root.attrs.get(_STORE_MARK):
+            raise ValueError(f"{path} is not a fluxscale cascade store.")
         return cls(root)
 
     @property

@@ -1,4 +1,4 @@
-"""Tests for waveletec.extra.sonification.
+"""Tests for fluxscale.extra.sonification.
 
 Whether something sounds good cannot be unit-tested. What can be tested is that
 each level does what it claims: L0 is the signal, L1 moves it into the hearing
@@ -13,11 +13,11 @@ import xarray as xr
 from scipy import signal as spsignal
 from scipy.io import wavfile
 
-import waveletec
-from waveletec import main as wmain
-from waveletec.extra import midi
-from waveletec.extra import sonification as so
-from waveletec.extra.decomposition import decompose
+import fluxscale
+from fluxscale import main as wmain
+from fluxscale.extra import midi
+from fluxscale.extra import sonification as so
+from fluxscale.extra.decomposition import decompose
 
 # Numerical trouble here goes quiet instead of crashing: a NaN in one band once
 # silenced every sustained voice while the rest of the audio stayed finite.
@@ -577,7 +577,7 @@ def test_sonifies_the_output_of_data_run():
                        for name in ("w", "co2")},
                       coords={"TIMESTAMP": pd.date_range("2022-05-13", periods=2, freq="30min"),
                               "ns": np.arange(2 ** 10)})
-    result = waveletec.data_run(data, ["w*co2"], fs=20, method="dwt", wavelet="db6", level=5)
+    result = fluxscale.data_run(data, ["w*co2"], fs=20, method="dwt", wavelet="db6", level=5)
     audio = so.sonify(result, "wco2", duration=1, sample_rate=RATE)
     assert audio.attrs["fs"] == 20  # read from the finest band
     assert np.isfinite(audio.values).all()
@@ -661,9 +661,9 @@ def test_silence_stays_digital_silence(tmp_path):
 
 
 def test_is_part_of_the_public_api():
-    assert waveletec.sonify is so.sonify
-    assert waveletec.export_midi is midi.export_midi
-    assert {"sonify", "export_midi"} <= set(waveletec.__all__)
+    assert fluxscale.sonify is so.sonify
+    assert fluxscale.export_midi is midi.export_midi
+    assert {"sonify", "export_midi"} <= set(fluxscale.__all__)
 
 
 def test_command_line(tmp_path, monkeypatch):
@@ -673,7 +673,7 @@ def test_command_line(tmp_path, monkeypatch):
         (tmp_path / f"{stamp}_raw.txt").write_text("header\n" * 9 + "w  co2\n" + rows + "\n")
     wav = tmp_path / "flux.wav"
     monkeypatch.setattr(sys, "argv", [
-        "waveletEC-sonify", "-i", str(tmp_path / "*_raw.txt"), "-v", "w*co2", "-o", str(wav),
+        "fluxscale-sonify", "-i", str(tmp_path / "*_raw.txt"), "-v", "w*co2", "-o", str(wav),
         "-d", "1", "-af", "20", "--scale", "minor_pentatonic", "--sample_rate", str(RATE),
         "--instruments", "cello", "marimba"])
     wmain.sonify()
@@ -682,7 +682,7 @@ def test_command_line(tmp_path, monkeypatch):
 
 
 def test_command_line_explains_a_pattern_that_matches_nothing(tmp_path, monkeypatch):
-    monkeypatch.setattr(sys, "argv", ["waveletEC-sonify", "-i", str(tmp_path / "nope*"),
+    monkeypatch.setattr(sys, "argv", ["fluxscale-sonify", "-i", str(tmp_path / "nope*"),
                                       "-v", "co2", "-o", str(tmp_path / "x.wav")])
     with pytest.raises(FileNotFoundError, match="No file"):
         wmain.sonify()
@@ -717,7 +717,7 @@ def exported(tmp_path, data, variable=None, **kwargs):
     """Write a file and read it back: the file, and the notes of each part by name."""
     mido = pytest.importorskip("mido")
     path = tmp_path / "piece.mid"
-    waveletec.export_midi(data, variable, path, **kwargs)
+    fluxscale.export_midi(data, variable, path, **kwargs)
     read = mido.MidiFile(path, charset="utf-8")
     return read, {track.name: notes_of(track) for track in read.tracks[1:]}
 
@@ -1005,7 +1005,7 @@ def test_midi_accepts_the_output_of_data_run_and_any_name(tmp_path):
 def test_midi_creates_folders_and_returns_the_file(tmp_path):
     mido = pytest.importorskip("mido")
     path = tmp_path / "deep" / "er" / "co2.mid"
-    written = waveletec.export_midi(red_noise(2 ** 10), None, str(path), duration=1)
+    written = fluxscale.export_midi(red_noise(2 ** 10), None, str(path), duration=1)
     assert isinstance(written, mido.MidiFile)
     assert len(mido.MidiFile(path).tracks) == len(written.tracks)
 
@@ -1020,14 +1020,14 @@ def test_midi_creates_folders_and_returns_the_file(tmp_path):
 def test_bad_input_to_midi_is_explained(tmp_path, kwargs, message):
     pytest.importorskip("mido")
     with pytest.raises(ValueError, match=message):
-        waveletec.export_midi(red_noise(64), None, tmp_path / "x.mid", **kwargs)
+        fluxscale.export_midi(red_noise(64), None, tmp_path / "x.mid", **kwargs)
     assert not (tmp_path / "x.mid").exists()
 
 
 def test_midi_explains_how_to_get_mido(tmp_path, monkeypatch):
     monkeypatch.setattr(midi, "mido", None)
-    with pytest.raises(ImportError, match=r"waveletec\[midi\]"):
-        waveletec.export_midi(red_noise(64), None, tmp_path / "x.mid")
+    with pytest.raises(ImportError, match=r"fluxscale\[midi\]"):
+        fluxscale.export_midi(red_noise(64), None, tmp_path / "x.mid")
 
 
 def command_line_input(tmp_path):
@@ -1041,7 +1041,7 @@ def test_command_line_writes_midi(tmp_path, monkeypatch):
     mido = pytest.importorskip("mido")
     path = tmp_path / "flux.mid"
     monkeypatch.setattr(sys, "argv", [
-        "waveletEC-sonify", "-i", command_line_input(tmp_path), "-v", "w*co2", "-o", str(path),
+        "fluxscale-sonify", "-i", command_line_input(tmp_path), "-v", "w*co2", "-o", str(path),
         "-d", "2", "-af", "20", "--scale", "minor_pentatonic", "--instruments", "cello", "marimba"])
     wmain.sonify()
     read = mido.MidiFile(path)
@@ -1052,7 +1052,7 @@ def test_command_line_writes_midi(tmp_path, monkeypatch):
 
 
 def test_command_line_midi_is_level_2(tmp_path, monkeypatch, capsys):
-    monkeypatch.setattr(sys, "argv", ["waveletEC-sonify", "-i", str(tmp_path / "nope*"), "-v", "co2",
+    monkeypatch.setattr(sys, "argv", ["fluxscale-sonify", "-i", str(tmp_path / "nope*"), "-v", "co2",
                                       "-o", str(tmp_path / "x.mid"), "-l", "1"])
     with pytest.raises(SystemExit):
         wmain.sonify()

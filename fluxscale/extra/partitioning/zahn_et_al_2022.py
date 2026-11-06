@@ -8,9 +8,9 @@ import pandas as pd
 import numpy as np
 # Project modules
 import yaml
-from waveletec.core import commons as hc24
-from waveletec.core import wavelet_functions as wavelet_functions
-from waveletec.extra.partitioning.coimbra_et_al_2025 import conditional_sampling
+from fluxscale.core import commons as hc24
+from fluxscale.core import wavelet_functions as wavelet_functions
+from fluxscale.extra.partitioning.coimbra_et_al_2025 import conditional_sampling
 
 logger = logging.getLogger('cond_ec')
 
@@ -23,9 +23,9 @@ def run_cec(ymd, raw_kwargs, output_path,
     raise NotImplementedError(
         "run_cec (Zahn et al., 2022 time-domain conditional sampling) depends on "
         "`commons.loaddatawithbuffer`, which was removed during the xarray "
-        "refactor and has not been re-implemented. Use `waveletec.process(...)` "
+        "refactor and has not been re-implemented. Use `fluxscale.process(...)` "
         "together with the wavelet conditional-sampling partitioning in "
-        "`waveletec.extra.partitioning.coimbra_et_al_2025` instead.")
+        "`fluxscale.extra.partitioning.coimbra_et_al_2025` instead.")
 
     info_t_start = time.time()
     logger.info('Entered wavelet code (run_cec).')
@@ -174,7 +174,7 @@ def __concat__(sitename, outputpath, **kwargs):
 def handle_eddypro_setup(**args):
     # Imported lazily to avoid a circular import at module load time
     # (eddypro -> core -> handlers -> partitioning -> zahn -> eddypro).
-    from waveletec.extra.eddypro import read_eddypro_metadata_file
+    from fluxscale.extra.eddypro import read_eddypro_metadata_file
     if args['eddypro']:
         eddypro_setup = read_eddypro_metadata_file(args['eddypro'])
         if args['sitename'] is None: args['sitename'] = eddypro_setup['Project']['project_title']

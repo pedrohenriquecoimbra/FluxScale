@@ -7,14 +7,16 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-11-06
+
 ### Added
 
 - `data_conditional_sampling_mean` (`conditional_sampling_mean` in
-  `waveletec.extra.partitioning.coimbra_et_al_2025`): the means of the sign
+  `fluxscale.extra.partitioning.coimbra_et_al_2025`): the means of the sign
   classes, without building one full-size array per class.
 - `data_run(average=True)`: the result of `data_average_dims`, without building
   the conditional sampling at full resolution.
-- `waveletec.sonify` (`waveletec.extra.sonification`) turns any variable into
+- `fluxscale.sonify` (`fluxscale.extra.sonification`) turns any variable into
   sound at three levels: 0, the signal as an audio file; 1, the signal altered
   for human hearing (wavelet scales expanded into the hearing range, equalised
   and weighted for equal loudness); 2, music, in which a flux such as `w*co2` is
@@ -22,13 +24,18 @@ breaking changes bump the minor version).
   are chosen from `INSTRUMENTS`, `loudness_range` keeps calm passages softer but
   audible, and `stems=True` returns one track per wavelet scale. Experimental:
   the API may still change. Uses only existing dependencies.
-- `waveletec.decompose`: a signal or flux split into wavelet scales, as a Dataset.
-- `waveletec.export_midi` writes the same composition as MIDI, for a DAW. Needs
+- `fluxscale.decompose`: a signal or flux split into wavelet scales, as a Dataset.
+- `fluxscale.export_midi` writes the same composition as MIDI, for a DAW. Needs
   the new `midi` extra.
-- `waveletEC-sonify` command-line entry point, for `.wav` and `.mid` output.
+- `fluxscale-sonify` command-line entry point, for `.wav` and `.mid` output.
 
 ### Changed
 
+- **Renamed to FluxScale.** Install `fluxscale` and `import fluxscale`. The
+  commands become `fluxscale`, `fluxscale-exec`, `fluxscale-partition`,
+  `fluxscale-integrate`, `fluxscale-eddypro_run` and `fluxscale-sonify`. A last
+  `waveletec` release installs `fluxscale` and keeps old imports and commands
+  working. Cascade stores written before the rename still open.
 - `process` only keeps averages, so it now calls `data_run(average=True)`. On a
   day of 20 Hz data with nine covariance formulas it runs 2.8x faster and peaks
   at 1.4 GB instead of 4.9 GB. The conditional sampling in its output changes
