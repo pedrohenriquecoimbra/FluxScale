@@ -5,6 +5,24 @@ All notable changes to this project are documented here. The format is based on
 adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html) (pre-1.0:
 breaking changes bump the minor version).
 
+## [Unreleased]
+
+### Added
+
+- `data_conditional_sampling_mean` (`conditional_sampling_mean` in
+  `waveletec.extra.partitioning.coimbra_et_al_2025`): the means of the sign
+  classes, without building one full-size array per class.
+- `data_run(average=True)`: the result of `data_average_dims`, without building
+  the conditional sampling at full resolution.
+
+### Changed
+
+- `process` only keeps averages, so it now calls `data_run(average=True)`. On a
+  day of 20 Hz data with nine covariance formulas it runs 2.8x faster and peaks
+  at 1.4 GB instead of 4.9 GB. The conditional sampling in its output changes
+  only by floating-point summation order (relative differences below 2e-14);
+  everything else is bit-identical.
+
 ## [0.5.0] - 2026-06-04
 
 ### Removed (breaking)

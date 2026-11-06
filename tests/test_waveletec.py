@@ -109,6 +109,112 @@ def test_conditional_sampling_keys_and_masking():
 
 
 # --------------------------------------------------------------------------- #
+# conditional_sampling_mean: the means of the classes, without building them
+# --------------------------------------------------------------------------- #
+def _signed_products():
+    """Products on (scale, period, sample), each with NaNs and exact zeros."""
+    rng = np.random.default_rng(3)
+    shape = (3, 2, 200)
+    data = {}
+    for name in ("wco2", "wh2o", "wts"):
+        x = rng.standard_normal(shape)
+        x[rng.random(shape) < 0.05] = 0.0
+        x[rng.random(shape) < 0.05] = np.nan
+        data[name] = (("natural_frequency", "TIMESTAMP", "ns"), x)
+    coords = {"natural_frequency": [1.0, 0.5, 0.25],
+              "TIMESTAMP": pd.date_range("2022-05-13", periods=2, freq="30min"),
+              "ns": np.arange(shape[-1])}
+    return xr.Dataset(data, coords=coords)
+
+
+def _assert_mean_matches_classes(data, formulas, dim):
+    expected = xr.merge(
+        [handlers.data_conditional_sampling(data, f) for f in formulas]).mean(dim)
+    result = handlers.data_conditional_sampling_mean(data, formulas, dim)
+    xr.testing.assert_allclose(result, expected, rtol=1e-12, atol=1e-14)
+    return result
+
+
+@pytest.mark.parametrize("formulas", [
+    ["w*co2"],
+    ["w*co2|w*h2o"],
+    ["w*co2|w*h2o|w*ts"],
+    ["w*co2|w*h2o", "w*h2o|w*co2", "w*co2|w*ts", "w*co2|w*h2o|w*ts"],
+])
+def test_conditional_sampling_mean_matches_averaged_classes(formulas):
+    _assert_mean_matches_classes(_signed_products(), formulas, "ns")
+
+
+@pytest.mark.parametrize("dim", [
+    ["ns"], ["TIMESTAMP", "ns"], ["natural_frequency", "TIMESTAMP", "ns"]])
+def test_conditional_sampling_mean_over_several_dims(dim):
+    _assert_mean_matches_classes(_signed_products(), ["w*co2|w*h2o"], dim)
+
+
+def test_conditional_sampling_mean_keeps_complex_values():
+    # the CWT reconstruction is complex
+    result = _assert_mean_matches_classes(
+        _signed_products() * (1 + 0.5j), ["w*co2|w*h2o"], "ns")
+    assert result["wco2+wh2o+"].dtype == complex
+
+
+def test_conditional_sampling_mean_with_an_all_nan_variable():
+    data = _signed_products()
+    data["wh2o"] = data["wh2o"] * np.nan
+    result = _assert_mean_matches_classes(
+        data, ["w*co2|w*h2o", "w*h2o|w*co2"], "ns")
+    # wco2 has samples, none in a class; wh2o has no sample to average
+    assert (result["wco2+wh2o+"] == 0).all()
+    assert result["wh2o+wco2+"].isnull().all()
+
+
+def _raw_dataset():
+    rng = np.random.default_rng(5)
+    shape = (2, 1024)
+    variables = {v: (("TIMESTAMP", "ns"), rng.standard_normal(shape).cumsum(axis=1))
+                 for v in ("w", "co2", "h2o", "ts")}
+    ds = xr.Dataset(variables, coords={
+        "TIMESTAMP": pd.date_range("2022-05-13", periods=2, freq="30min"),
+        "ns": np.arange(shape[-1])})
+    ds["co2"].values[0, 100:120] = np.nan
+    return ds
+
+
+@pytest.mark.filterwarnings("ignore:Level value of")
+def test_data_run_average_matches_averaging_the_full_result():
+    formulas = ["w*co2|w*h2o", "w*co2|w*h2o|w*ts", "w*ts"]
+    full = handlers.data_run(_raw_dataset(), formulas, fs=20)
+    averaged = handlers.data_run(_raw_dataset(), formulas, fs=20, average=True)
+    assert set(full.dims) == {"natural_frequency", "TIMESTAMP", "ns"}
+    xr.testing.assert_allclose(averaged, handlers.data_average_dims(full),
+                               rtol=1e-12, atol=1e-14)
+
+
+def test_data_run_average_without_formulas():
+    assert "w" in handlers.data_run(_raw_dataset(), [], fs=20, average=True)
+
+
+@pytest.mark.filterwarnings("ignore:Level value of")
+def test_process_saves_the_averaged_classes(tmp_path):
+    rng = np.random.default_rng(11)
+    header = "\n".join(["legend"] * 9 + ["  ".join(["u", "v", "w", "ts", "co2", "h2o"])])
+    for stamp in ("20220513-0030", "20220513-0100"):
+        np.savetxt(tmp_path / f"{stamp}_raw_dataset.txt",
+                   rng.standard_normal((512, 6)).cumsum(axis=0),
+                   header=header, comments="")
+
+    ds = handlers.process("20220513T0000-20220513T0100", 30, str(tmp_path), 20,
+                          covariance=["w*co2|w*h2o"], processing_time_duration="1h",
+                          output_folderpath=str(tmp_path / "out"))
+
+    assert ds.sizes["TIMESTAMP"] == 2
+    assert list((tmp_path / "out" / "wavelet_full_cospectra").glob("*.nc"))
+    # the classes split the product between them
+    classes = [f"csp_wco2{a}wh2o{b}" for a in "+-" for b in "+-"]
+    np.testing.assert_allclose(sum(ds[c] for c in classes), ds["csp_wco2"], atol=1e-12)
+
+
+# --------------------------------------------------------------------------- #
 # universal_wt
 # --------------------------------------------------------------------------- #
 @pytest.mark.filterwarnings("ignore:Level value of")
