@@ -177,7 +177,29 @@ fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2
 fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.mid
 ```
 
-The instruments are simple sketches. For real ones, take the composition to Reaper, Ableton or MuseScore: ```export_midi``` writes one track per melody line and per wavelet scale, named like the stems of ```sonify(..., stems=True)```, so the two line up.
+#### Working in a DAW
+
+The instruments are simple sketches. For real ones, take the L2 composition to Reaper, Ableton or MuseScore as MIDI, with the stems as a reference (```pip install "fluxscale[midi]"```):
+
+```python
+from fluxscale.extra.sonification import write_wav
+
+kwargs = dict(duration=30, scale="pentatonic", instruments=("cello", "marimba"))
+
+fluxscale.export_midi(data, "w*co2", "daw/flux.mid", **kwargs)
+stems = fluxscale.sonify(data, "w*co2", stems=True, **kwargs)
+for name in stems.stem.values:
+    write_wav(stems.sel(stem=name), f"daw/{name.replace(':', '')}.wav")
+```
+
+Tracks and stems have the same names and, with the same arguments, the same notes: one per wavelet scale (```0.078125 Hz```), the ```bass``` of a duet, and one per melody line (```line: co2```). Each line carries the General MIDI program of its instrument, a starting point for loading your own.
+
+- **Lines** are the notes of the audio, with velocities from the activity of the variable.
+- **Scales** stay on the note of their voice. A note sounds whenever the energy at that scale has moved, so the velocities trace it: a steady scale is one long note.
+- **Time.** A melody slot is an eighth note, which makes 90 BPM unless the record has few samples, and the file carries its tempo. Import it when asked, keep the tracks separate, and place everything at the start of the project: tracks and stems then stay in time.
+- **Not in the file.** Keys are equal-tempered, so the pure ratios of the audio become the nearest key. Pan, room and mastering stay in the stems.
+
+Web apps built on this are in [FluxSound](https://github.com/pedrohenriquecoimbra/FluxSound).
 
 
 ### Output Format
