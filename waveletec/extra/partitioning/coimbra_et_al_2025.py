@@ -1,5 +1,6 @@
 # built-in modules
 import logging
+import math
 
 # 3rd party modules
 import numpy as np
@@ -14,6 +15,7 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "conditional_sampling",
+    "conditional_sampling_mean",
     "partition_DWCS",
     "partition_DWCS_H2O",
     "partition_DWCS_CH4",
@@ -40,6 +42,26 @@ def _as_series(data, x):
     if isinstance(x, (list, tuple)):
         return sum(data[c] for c in x)
     return x
+
+
+def _sign_classes(names, label):
+    """Yield ``(class name, signs)`` for every combination of signs over *names*.
+
+    Args:
+        names: Variable names, one per condition.
+        label: Dictionary mapping condition values to labels, e.g. {1: "+", -1: "-"}.
+
+    Yields:
+        The class name (e.g. ``"wco2+wh2o-"``) and its tuple of condition values.
+    """
+    n = len(names)
+    # run for all unique combinations of + and - for groups of size n
+    # (e.g., n=2: ++, +-, -+, --, n=3 : +++, ++-, ...)
+    for co in set(itertools.combinations(list(label.keys())*n, n)):
+        if not co:
+            continue
+        sign = ''.join([label[c] for c in co])
+        yield ''.join([c for cs in zip(names, sign) for c in cs]), co
 
 
 def conditional_sampling(Y12, *args, names=None, label=None, false=0):
@@ -69,16 +91,10 @@ def conditional_sampling(Y12, *args, names=None, label=None, false=0):
         
     YS = list(args)
     Ys = xr.Dataset()  # Initialize as an empty xarray.Dataset
-    
-    # run for all unique combinations of + and - for groups of size n
-    # (e.g., n=2: ++, +-, -+, --, n=3 : +++, ++-, ...)
-    for co in set(itertools.combinations(list(label.keys())*nargs, nargs)):
-        if not co:
-            continue
-        sign = ''.join([label[c] for c in co])
-        name = ''.join([c for cs in zip(names, sign) for c in cs])
+
+    for name, co in _sign_classes(names, label):
         Ys[name] = Y12
-        logger.debug(f"name: {name}, co: {co}, sign: {sign}")
+        logger.debug(f"name: {name}, co: {co}")
 
         # Apply conditions by sign
         for i, c in enumerate(co):
@@ -86,11 +102,89 @@ def conditional_sampling(Y12, *args, names=None, label=None, false=0):
                 mask = xr.where(c * YS[i] > 0, 1, false)
             else:
                 mask = xr.where(YS[i] == 0, 1, false)
-            
+
             mask = np.where(mask == 0, false, mask)
             Ys[name] = Ys[name] * mask
-    
+
     return Ys
+
+
+def _base3(digits):
+    """Read *digits* (integers or integer arrays) as one base-3 number."""
+    code = 0
+    for digit in digits:
+        code = 3 * code + digit
+    return code
+
+
+def _sum_by_code(code, x, n_codes):
+    """Sum *x* by integer *code*. np.bincount takes no complex weights, which the CWT gives."""
+    if np.iscomplexobj(x):
+        return (_sum_by_code(code, x.real, n_codes)
+                + 1j * _sum_by_code(code, x.imag, n_codes))
+    return np.bincount(code, weights=x, minlength=n_codes)
+
+
+@np.errstate(invalid='ignore')  # complex NaNs in comparisons, 0/0 with nothing to average
+def conditional_sampling_mean(data, groups, dim):
+    """
+    Mean over *dim* of each sign class, without building the classes.
+
+    :func:`conditional_sampling` returns one full-size array per class. When only
+    their means are wanted, it is much cheaper to work out the class of each
+    sample and add the sample to a running total for that class, one row (e.g.
+    one scale in one averaging period) at a time. The result is the mean of what
+    conditional_sampling returns with ``label={1: "+", -1: "-"}``, up to
+    floating-point summation order: every sample whose sampled value is not NaN
+    counts in the denominator, even when zero or NaN in a condition puts it in no
+    class.
+
+    Parameters:
+    - data: xarray.Dataset holding every variable named in *groups*
+    - groups: list of lists of variable names, one list per conditional sampling.
+      The first name is the variable sampled; every name, the first included, is
+      a condition on its sign (c.f. data_conditional_sampling)
+    - dim: dimension or list of dimensions to average over
+
+    Returns:
+    - xarray.Dataset with one variable per class, named as in conditional_sampling
+    """
+    if not groups:
+        return xr.Dataset()
+
+    dims = [dim] if isinstance(dim, str) else dim
+    conditions = list(dict.fromkeys(name for group in groups for name in group))
+    arrays = xr.broadcast(*[data[name] for name in conditions])
+
+    kept = [d for d in arrays[0].dims if d not in dims]
+    averaged = [d for d in arrays[0].dims if d in dims]
+    sizes = arrays[0].sizes
+    n_rows = math.prod(sizes[d] for d in kept)
+    n_samples = math.prod(sizes[d] for d in averaged)
+    values = {name: array.transpose(*kept, *averaged).values.reshape(n_rows, n_samples)
+              for name, array in zip(conditions, arrays)}
+
+    # A class is a base-3 code with one digit per condition: 1 for positive, 0 for
+    # negative, 2 for neither. A NaN in the sampled variable only reaches codes
+    # where its own digit is 2, which no class reads, so it needs no cleaning.
+    digit = {1: 1, -1: 0}
+    totals = [np.empty((n_rows, 3 ** len(group)),
+                       dtype=np.result_type(values[group[0]], float))
+              for group in groups]
+    for row in range(n_rows):
+        digits = {name: np.where(x[row] > 0, 1, np.where(x[row] < 0, 0, 2))
+                  for name, x in values.items()}
+        for group, total in zip(groups, totals):
+            total[row] = _sum_by_code(_base3(digits[name] for name in group),
+                                      values[group[0]][row], total.shape[1])
+
+    means = {}
+    for group, total in zip(groups, totals):
+        count = np.count_nonzero(~np.isnan(values[group[0]]), axis=1)
+        for name, signs in _sign_classes(group, {1: "+", -1: "-"}):
+            mean = total[:, _base3(digit[s] for s in signs)] / count
+            means[name] = (kept, mean.reshape([sizes[d] for d in kept]))
+    return xr.Dataset(means, coords=arrays[0].isel({d: 0 for d in averaged}, drop=True).coords)
 
 
 def partition_DWCS(data, labelpositive='GPP', labelnegative='Reco', all='wco2',

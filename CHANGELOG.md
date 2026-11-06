@@ -9,6 +9,11 @@ breaking changes bump the minor version).
 
 ### Added
 
+- `data_conditional_sampling_mean` (`conditional_sampling_mean` in
+  `waveletec.extra.partitioning.coimbra_et_al_2025`): the means of the sign
+  classes, without building one full-size array per class.
+- `data_run(average=True)`: the result of `data_average_dims`, without building
+  the conditional sampling at full resolution.
 - `waveletec.sonify` (`waveletec.extra.sonification`) turns any variable into
   sound at three levels: 0, the signal as an audio file; 1, the signal altered
   for human hearing (wavelet scales expanded into the hearing range, equalised
@@ -21,6 +26,14 @@ breaking changes bump the minor version).
 - `waveletec.export_midi` writes the same composition as MIDI, for a DAW. Needs
   the new `midi` extra.
 - `waveletEC-sonify` command-line entry point, for `.wav` and `.mid` output.
+
+### Changed
+
+- `process` only keeps averages, so it now calls `data_run(average=True)`. On a
+  day of 20 Hz data with nine covariance formulas it runs 2.8x faster and peaks
+  at 1.4 GB instead of 4.9 GB. The conditional sampling in its output changes
+  only by floating-point summation order (relative differences below 2e-14);
+  everything else is bit-identical.
 
 ## [0.5.0] - 2026-06-04
 

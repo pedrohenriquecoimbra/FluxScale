@@ -78,6 +78,40 @@ data = ...
 waveletec.data_run(data, ...)
 ```
 
+### Low frequencies over long records (deconstructed cascade)
+
+The regular pipeline processes one averaging window at a time, so it cannot
+resolve scales longer than the window. For that, `waveletec.core.cascade`
+decomposes arbitrarily long records (years of 20 Hz data) with bounded
+memory, in two stages: chunks are decomposed to `split_level` with overlap
+margins and the coefficients appended to a [zarr](https://zarr.dev) store
+(`pip install waveletec[cascade]`); the carried approximation — a factor
+`2**split_level` shorter — is then decomposed in memory down to any depth.
+The result is exactly (machine precision) the DWT of the whole record.
+
+```python
+from waveletec.core import cascade
+
+store = cascade.CascadeStore.create(
+    'FR-Gri_cascade.zarr', variables=['w', 'co2'], n_samples=n, fs=20,
+    split_level=9, t0='2020-01-01T00:00:00')          # n multiple of 2**9
+cascade.cascade_run(store, {'w': w, 'co2': co2})      # stage 1: chunked, resumable
+cascade.cascade_finish(store)                         # stage 2: seconds, re-runnable
+
+cascade.scale_covariance(store, 'w', 'co2', window=1800)  # cospectra per scale
+cascade.open_level(store, 'co2', 21)   # ~29 h scale (needs >= ~2 weeks of data
+                                       #  so cascade_finish reaches level 21)
+```
+
+Sources may be numpy/memmap/dask/xarray/pandas or a callable `f(i0, i1)`
+reading samples from disk, which must return exactly `i1 - i0` samples; gaps
+(NaN), however long, are linearly interpolated and reported per coefficient
+in `qc` arrays. Levels sum to the whole-record covariance exactly only when
+`n` is divisible by `2**level`: otherwise the record-end coefficients of the
+deep levels are off (0.2 to 11% of the total on the 3-day FR-Gri sample),
+interior coefficients being unaffected. See `tests/test_cascade.py` for
+exactness guarantees.
+
 ### Saving Results
 
 If you're using ```waveletec.process```, just pass the ```output_folderpath``` parameter like this: ```waveletec.process(..., output_folderpath='PATH/TO/OUTPUT/FOLDER')```. This will create a new subfolder called 'wavelet_full_cospectra' for you, and you'll find the sum of all your files neatly stored in the output_folderpath you specified.

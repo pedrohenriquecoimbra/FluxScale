@@ -49,7 +49,7 @@ from . import commons
 from ..io import READERS
 # from .read_data import loaddatawithbuffer
 from .wavelet_functions import universal_wt, formula_to_vars, prepare_signal
-from ..extra.partitioning.coimbra_et_al_2025 import conditional_sampling, partition_DWCS, partition_DWCS_CO, partition_DWCS_H2O
+from ..extra.partitioning.coimbra_et_al_2025 import conditional_sampling, conditional_sampling_mean, partition_DWCS, partition_DWCS_CO, partition_DWCS_H2O
 from ..extra import eddypro as eddypro
 
 
@@ -61,6 +61,7 @@ __all__ = [
     "data_statistics",
     "data_compute_product",
     "data_conditional_sampling",
+    "data_conditional_sampling_mean",
     "data_partition",
     "data_average_dims",
     "data_integrate_in_frequency",
@@ -194,6 +195,13 @@ def data_compute_product(data, formula='w*co2|w*h2o', name=None):
     return data
 
 
+def _condsamp_names(formula):
+    """Names of the variables of a formula: the one sampled, then its conditions."""
+    formulavar = formula_to_vars(formula) if isinstance(formula, str) else formula
+    return [''.join(formulavar.xy)] + [''.join(cs)
+                                       for cs in formulavar.condsamp_pair]
+
+
 def data_conditional_sampling(data, formula='w*co2|w*h2o'):
     """
     Calculate conditional sampling from a formula for xarray.Dataset.
@@ -205,11 +213,8 @@ def data_conditional_sampling(data, formula='w*co2|w*h2o'):
     Returns:
     - xarray.Dataset with the conditional sampling results
     """
-    formulavar = formula_to_vars(formula) if isinstance(formula, str) else formula
-
     # Generate names for variables
-    names = [''.join(formulavar.xy)] + [''.join(cs)
-                                        for cs in formulavar.condsamp_pair]
+    names = _condsamp_names(formula)
 
     # If name in names not in data, calculate it
     for n in names:
@@ -224,6 +229,24 @@ def data_conditional_sampling(data, formula='w*co2|w*h2o'):
     ) if names else {}
 
     return φc
+
+
+def data_conditional_sampling_mean(data, formulas, dim):
+    """
+    Calculate the mean of the conditional sampling of each formula for xarray.Dataset.
+
+    Gives the mean of what data_conditional_sampling returns, without building its
+    full-size arrays (see conditional_sampling_mean).
+
+    Parameters:
+    - data: xarray.Dataset holding the products named in the formulas
+    - formulas: list of strings or objects specifying the formulas (e.g., ['w*co2|w*h2o'])
+    - dim: dimension or list of dimensions to average over
+
+    Returns:
+    - xarray.Dataset with the averaged conditional sampling results
+    """
+    return conditional_sampling_mean(data, [_condsamp_names(f) for f in formulas], dim)
 
 
 def data_partition(data, dst=None,
@@ -506,10 +529,8 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
                 else:
                     logger.warning(f"Trying to filter {var}, but variable not found in data.")
 
-            ds = data_run(data, sel={'TIMESTAMP': slice(min(yl), max(yl) + datetime.timedelta(minutes=fileduration))},
-                      dst=None, **run_kwargs)
-            ds_average = ds.mean(dim=[d for d in ds.dims if d not in {
-                'TIMESTAMP', 'natural_frequency'}])
+            ds_average = data_run(data, sel={'TIMESTAMP': slice(min(yl), max(yl) + datetime.timedelta(minutes=fileduration))},
+                                  dst=None, average=True, **run_kwargs)
             ds_average.to_netcdf(output_path)
             ds_collection += [ds_average]
 
@@ -576,7 +597,7 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     return ds_collection
 
 
-def data_run(data, varstorun, sel=None, average_period='30min', dst=None, **kwargs):
+def data_run(data, varstorun, sel=None, average_period='30min', dst=None, average=False, **kwargs):
     """
     Main function to decompose, calculate covariance, and average data using xarray.Dataset.
 
@@ -585,6 +606,9 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, **kwar
     - varstorun: list of formulas to run
     - sel: dict with keys matching dimensions and values (c.f. xarray.Dataset.sel)
     - average_period: period for averaging
+    - dst: path to save the result to
+    - average: return the result of data_average_dims. Much faster and lighter than
+      averaging the full result, whose conditional sampling is the bulk of it
     - output_kwargs: output configuration
     - meta: metadata dictionary
     - **kwargs: additional arguments for decompose_data
@@ -633,13 +657,17 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, **kwar
 
     # Calculate conditional sampling
     info_t_calc_cond_samp = time.time()
-    data_condsamp = [
-        data_conditional_sampling(data_product, f)
-        for f in varstorun
-    ]
+    if average:
+        data_condsamp = data_conditional_sampling_mean(
+            data_product, varstorun,
+            dim=[d for d in data_product.dims if d not in {'TIMESTAMP', 'natural_frequency'}])
+    else:
+        data_condsamp = xr.merge([
+            data_conditional_sampling(data_product, f)
+            for f in varstorun
+        ])
     logger.debug(
         f'\tCalculate conditional sampling took {round(time.time() - info_t_calc_cond_samp)} s.')
-    data_condsamp = xr.merge(data_condsamp)
 
     # Low-frequency
     xycovs = list(
@@ -667,6 +695,9 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, **kwar
     # Merge attrs
     for ds in [data, data_stats, data_product, data_lf, data_condsamp]:
         response.attrs.update(ds.attrs)
+
+    if average:
+        response = data_average_dims(response)
 
     # Save data
     if dst:
