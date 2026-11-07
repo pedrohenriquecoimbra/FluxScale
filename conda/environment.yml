@@ -12,6 +12,7 @@ dependencies:
   - pyyaml
   - xarray
   - dask
+  - joblib>=1.3
   - pip
   - pip:
       - regorator

@@ -35,6 +35,8 @@ The main function is:
 import os
 import re
 import logging
+import logging.handlers
+import queue
 import warnings
 import time
 import datetime
@@ -43,6 +45,7 @@ import glob
 # 3rd party modules
 import dask
 from dask.utils import parse_bytes
+import joblib
 import numpy as np
 import xarray as xr
 
@@ -409,6 +412,214 @@ def data_integrate_in_frequency(data, f0, freq='natural_frequency'):
     return ds
 
 
+def _date_from_yl(date, processing_time_duration):
+    date = re.sub('[-: ]', '', str(date))
+    if processing_time_duration.endswith("D"):
+        date = date[:8]
+    if processing_time_duration.endswith("H") or processing_time_duration.endswith("Min"):
+        date = date[:12]
+    return date
+
+
+def _validate_run(date, yl, output_path, curoutpath_inprog, overwrite,
+                  compare_start=True, compare_end=False):
+    # recheck if files exist and overwrite option
+    # doesn't save time (maybe only save 5min)
+    file_name = os.path.basename(output_path.format(date))
+    part_name0 = file_name.rsplit('_', 1)[0] + '_' if compare_start else ''
+    part_name1 = file_name.rsplit('.', 1)[-1] if compare_end else ''
+    current_files = [p for p in os.listdir(os.path.dirname(
+        output_path)) if p.startswith(part_name0) and p.endswith(part_name1)]
+
+    if not overwrite and current_files: #file_name in os.path.exists(output_pathmodel.format(date)):
+        logger.warning(
+            "UserWarning: Skipping, file already exists ({}).".format(date))
+        return False
+
+    # # if all([os.path.exists(output_pathmodel.format(_yl.strftime('%Y%m%d%H%M'))) for _yl in yl[:-1]]):
+    # if all([output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files for _yl in yl[:-1]]):
+    #     logger.warning(
+    #         "UserWarning: Skipping, file already exists ({}).".format(date))
+    #     return False
+    # # elif any([os.path.exists(output_pathmodel.format(_yl.strftime('%Y%m%d%H%M'))) for _yl in yl[:-1]]):
+    # if any([output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files for _yl in yl[:-1]]):
+    #     logger.warning("UserWarning: Continuing but some files already exist ({}), others don't ({}).".format(
+    #         ', '.join([_yl.strftime('%Y%m%d%H%M') for _yl in yl[:-1] if output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files]),
+    #         ', '.join([_yl.strftime('%Y%m%d%H%M') for _yl in yl[:-1] if not output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files]),
+    #     ))
+    #     return True
+
+    if commons.checkifinprogress(curoutpath_inprog):
+        return False
+    return True
+
+
+def _load_data(yl, input_path, reader):
+    def date2name(date):
+        return date.strftime('%Y%m%d-%H%M')
+
+    start_time = time.time()
+    paths = [
+        file
+        for name in [date2name(d) for d in yl]
+        for file in glob.glob(f'{os.path.join(input_path, name)}*')
+    ]
+
+    data = []
+
+    for p in paths:
+        try:
+            data += [reader(p)]
+        except Exception as e:
+            logger.error(f"Error when reading {p}: {e}")
+
+    try:
+        data = xr.concat(data, dim='TIMESTAMP')
+    except Exception as e:
+        data = xr.Dataset()
+        logger.error(str(e))
+    # if data.size == 0:
+    #     logger.warning(
+    #             f"UserWarning: No file found ({date}, path: {input_path}).")
+    #     return None
+    logger.debug(f'\tLoading data took {round(time.time() - start_time)} s.')
+    return data
+
+
+def _exit(curoutpath_inprog):
+    if os.path.exists(curoutpath_inprog):
+        os.remove(curoutpath_inprog)
+
+
+def _clear_unfinished(output_folderpath, run_time):
+    """
+    Remove what a stopped run left: the markers of the periods it had in
+    progress and their incomplete files. The next run would skip those periods
+    as already done. Stopping one worker stops them all, at any point.
+    """
+    suffix = '.inprogress'
+    folder = glob.escape(os.path.join(output_folderpath, "wavelet_full_cospectra"))
+    for marker in glob.glob(os.path.join(folder, f"*_{run_time}.nc{suffix}")):
+        for path in (marker[:-len(suffix)], marker):
+            if os.path.exists(path):
+                os.remove(path)
+
+
+def _process_period(yl, processing_time_duration, fileduration, input_path, reader,
+                    output_folderpath, identifier, run_time, overwrite,
+                    filter_criteria, run_kwargs):
+    """
+    Read, decompose, average and save one period of `process`. Returns the
+    averaged dataset, or None if the period was skipped or failed.
+    """
+    info_t_yl_ymd = time.time()
+    output_path = None
+    curoutpath_inprog = ""
+    result = None
+
+    try:
+        date = _date_from_yl(yl[0], processing_time_duration)
+
+        logger.info("%s reading", date)
+
+        if output_folderpath is not None:
+            output_path = str(os.path.join(
+                output_folderpath,
+                "wavelet_full_cospectra",
+                f"{identifier}_full_cospectra_{date}_{run_time}.nc"))
+            commons.mkdirs(output_path)
+            curoutpath_inprog = f"{output_path}.inprogress"
+            logger.debug(f'In progress file: {curoutpath_inprog}.')
+            if not _validate_run(date, yl, output_path, curoutpath_inprog, overwrite):
+                return None
+    except Exception as e:
+        logger.critical(e)
+        warnings.warn(str(e))
+        return None
+
+    try:
+        data = _load_data(yl, input_path, reader)
+    except Exception as e:
+        logger.critical(e)
+        raise
+
+    if data is None:
+        _exit(curoutpath_inprog)
+        return None
+
+    try:
+        # main run
+        for var, criteria in filter_criteria.items():
+            if var in data:
+                data[var] = data[var].where(
+                    (data[var] >= criteria.start) & (data[var] < criteria.stop))
+            else:
+                logger.warning(f"Trying to filter {var}, but variable not found in data.")
+
+        ds_average = data_run(data, sel={'TIMESTAMP': slice(min(yl), max(yl) + datetime.timedelta(minutes=fileduration))},
+                              dst=None, average=True, **run_kwargs)
+        if output_path is not None:
+            ds_average.to_netcdf(output_path)
+        result = ds_average
+
+        # allvars = run_kwargs['varstorun']
+        # saved_files = []
+        # for f in allvars:
+        #     run_kwargs['varstorun'] = [f]
+        #     output = data_run(data, period=[min(yl), max(yl)],
+        #                   meta=meta,
+        #                   dst=output_path, **run_kwargs)
+        #     saved_files.append(output.saved)
+        #     fulldata = pd.concat([fulldata, output.data], axis=0)
+
+        # for f in [s for s_ in saved_files for s in s_]:
+        #     if os.path.exists(f):
+        #         os.rename(f, f.replace('.part', ''))
+
+    except Exception as e:
+        logger.critical(e)
+
+    logger.debug(
+        f"Date loop ({yl[0].strftime('%Y%m%d-%H%M')}:{yl[-1].strftime('%Y%m%d-%H%M')}) took {round(time.time() - info_t_yl_ymd)} s.")
+    _exit(curoutpath_inprog)
+    return result
+
+
+def _process_period_in_worker(log_level, yl, **kwargs):
+    """
+    Run `_process_period` in a worker process, which has none of the log handlers
+    of the main one. Returns its result and its log records.
+    """
+    records = queue.SimpleQueue()
+    handler = logging.handlers.QueueHandler(records)
+    root = logging.getLogger()
+    root.setLevel(log_level)
+    root.addHandler(handler)
+    logging.captureWarnings(True)
+    try:
+        result = _process_period(yl, **kwargs)
+    finally:
+        root.removeHandler(handler)
+    return result, [records.get() for _ in range(records.qsize())]
+
+
+def _process_periods_in_parallel(ymd, n_workers, **kwargs):
+    """
+    Run `_process_period` on each period of *ymd* in *n_workers* processes.
+    Returns the results in the order of *ymd*, and logs each period as it ends.
+    """
+    logger.info("Running %d workers: each period logs when it ends.", n_workers)
+    log_level = logger.getEffectiveLevel()
+    tasks = (joblib.delayed(_process_period_in_worker)(log_level, yl, **kwargs)
+             for yl in ymd)
+    results = []
+    for result, records in joblib.Parallel(n_jobs=n_workers, return_as='generator')(tasks):
+        for record in records:
+            logging.getLogger(record.name).handle(record)
+        results.append(result)
+    return results
+
+
 def process(datetimerange, fileduration, input_path, acquisition_frequency,
             covariance=None, output_folderpath=None, verbosity=1,
             overwrite=False, processing_time_duration="1D",
@@ -417,86 +628,23 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
             integration_period=None,
             identifier=None,
             filter_criteria=None,
-            method="dwt", averaging=30, **kwargs):
+            method="dwt", averaging=30, n_jobs=1, **kwargs):
+    """
+    Decompose and average the raw files of *datetimerange*, saving one file per
+    *processing_time_duration*.
+
+    Parameters:
+    - n_jobs: periods to process at once (c.f. joblib.Parallel; -1 is one per
+      CPU). Each runs in its own process, with a whole period in memory.
+
+    Returns:
+    - xarray.Dataset with the averaged periods
+    """
     if filter_criteria is None:
         filter_criteria = {}
     logger.debug('--- Starting process ---')
     local_args = locals()
     info_t_start = time.time()
-
-    def _date_from_yl(date):
-        date = re.sub('[-: ]', '', str(date))
-        if processing_time_duration.endswith("D"):
-            date = date[:8]
-        if processing_time_duration.endswith("H") or processing_time_duration.endswith("Min"):
-            date = date[:12]
-        return date
-    
-    def _validate_run(date, yl, compare_start=True, compare_end=False):
-        # recheck if files exist and overwrite option
-        # doesn't save time (maybe only save 5min)
-        file_name = os.path.basename(output_path.format(date))
-        part_name0 = file_name.rsplit('_', 1)[0] + '_' if compare_start else ''
-        part_name1 = file_name.rsplit('.', 1)[-1] if compare_end else ''
-        current_files = [p for p in os.listdir(os.path.dirname(
-            output_path)) if p.startswith(part_name0) and p.endswith(part_name1)]
-
-        if not overwrite and current_files: #file_name in os.path.exists(output_pathmodel.format(date)):
-            logger.warning(
-                "UserWarning: Skipping, file already exists ({}).".format(date))
-            return False
-
-        # # if all([os.path.exists(output_pathmodel.format(_yl.strftime('%Y%m%d%H%M'))) for _yl in yl[:-1]]):
-        # if all([output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files for _yl in yl[:-1]]):
-        #     logger.warning(
-        #         "UserWarning: Skipping, file already exists ({}).".format(date))
-        #     return False
-        # # elif any([os.path.exists(output_pathmodel.format(_yl.strftime('%Y%m%d%H%M'))) for _yl in yl[:-1]]):
-        # if any([output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files for _yl in yl[:-1]]):
-        #     logger.warning("UserWarning: Continuing but some files already exist ({}), others don't ({}).".format(
-        #         ', '.join([_yl.strftime('%Y%m%d%H%M') for _yl in yl[:-1] if output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files]),
-        #         ', '.join([_yl.strftime('%Y%m%d%H%M') for _yl in yl[:-1] if not output_pathmodel.format(_yl.strftime('%Y%m%d%H%M')) in current_files]),
-        #     ))
-        #     return True
-
-        if commons.checkifinprogress(curoutpath_inprog):
-            return False
-        return True
-        
-    def _load_data():
-        def date2name(date):
-            return date.strftime('%Y%m%d-%H%M')
-
-        start_time = time.time()
-        paths = [
-            file
-            for name in [date2name(d) for d in yl]
-            for file in glob.glob(f'{os.path.join(input_path, name)}*')
-        ]
-
-        data = []
-
-        for p in paths:
-            try:
-                data += [READERS.get(reader_method)(p)]
-            except Exception as e:
-                logger.error(f"Error when reading {p}: {e}")
-
-        try:
-            data = xr.concat(data, dim='TIMESTAMP')
-        except Exception as e:
-            data = xr.Dataset()
-            logger.error(str(e))
-        # if data.size == 0:
-        #     logger.warning(
-        #             f"UserWarning: No file found ({date}, path: {input_path}).")
-        #     return None
-        logger.debug(f'\tLoading data took {round(time.time() - start_time)} s.')
-        return data
-    
-    def _exit():
-        if os.path.exists(curoutpath_inprog):
-            os.remove(curoutpath_inprog)
 
     # raw_kwargs = {'path': input_path, 'fkwargs': {
     #     'dt': 1/acquisition_frequency}}
@@ -518,7 +666,6 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     run_time = datetime.datetime.now().strftime("%Y%m%d%H%M%S%f")
     # output_path = ""
     # output_pathmodel = ""
-    curoutpath_inprog = ""
 
     
     if output_folderpath is not None:
@@ -537,7 +684,6 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     #     internal_averaging = averaging
     
     # fulldata = pd.DataFrame()
-    ds_collection = []
     
     _, _, _f = ymd
     ymd = commons.list_time_in_period(*ymd, processing_time_duration, include='right')
@@ -546,74 +692,30 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     logger.debug(
         f'Start date loop at {round(time.time() - info_t_start)} s.')
 
-    # Skip two line
-    for yl in ymd:
-        info_t_yl_ymd = time.time()
-        
-        try:
-            date = _date_from_yl(yl[0])
+    period_kwargs = {
+        'processing_time_duration': processing_time_duration,
+        'fileduration': fileduration,
+        'input_path': input_path,
+        # looked up here: workers lack readers registered while running
+        'reader': READERS.get(reader_method),
+        'output_folderpath': output_folderpath,
+        'identifier': identifier,
+        'run_time': run_time,
+        'overwrite': overwrite,
+        'filter_criteria': filter_criteria,
+        'run_kwargs': run_kwargs,
+    }
+    n_workers = min(joblib.effective_n_jobs(n_jobs), len(ymd))
 
-            logger.info("%s reading", date)
-
-            if output_folderpath is not None:
-                output_path = str(os.path.join(
-                    output_folderpath,
-                    "wavelet_full_cospectra",
-                    f"{identifier}_full_cospectra_{date}_{run_time}.nc"))
-                commons.mkdirs(output_path)
-                curoutpath_inprog = f"{output_path}.inprogress"
-                logger.debug(f'In progress file: {curoutpath_inprog}.')
-                if not _validate_run(date, yl):
-                    continue
-        except Exception as e:
-            logger.critical(e)
-            warnings.warn(str(e))
-            continue
-
-        try:
-            data = _load_data()
-        except Exception as e:
-            logger.critical(e)
-            raise
-        
-        if data is None:
-            _exit()
-            continue
-
-        try:
-            # main run
-            for var, criteria in filter_criteria.items():
-                if var in data:
-                    data[var] = data[var].where(
-                        (data[var] >= criteria.start) & (data[var] < criteria.stop))
-                else:
-                    logger.warning(f"Trying to filter {var}, but variable not found in data.")
-
-            ds_average = data_run(data, sel={'TIMESTAMP': slice(min(yl), max(yl) + datetime.timedelta(minutes=fileduration))},
-                                  dst=None, average=True, **run_kwargs)
-            ds_average.to_netcdf(output_path)
-            ds_collection += [ds_average]
-
-            # allvars = run_kwargs['varstorun']
-            # saved_files = []
-            # for f in allvars:
-            #     run_kwargs['varstorun'] = [f]
-            #     output = data_run(data, period=[min(yl), max(yl)],
-            #                   meta=meta,
-            #                   dst=output_path, **run_kwargs)
-            #     saved_files.append(output.saved)
-            #     fulldata = pd.concat([fulldata, output.data], axis=0)
-
-            # for f in [s for s_ in saved_files for s in s_]:
-            #     if os.path.exists(f):
-            #         os.rename(f, f.replace('.part', ''))
-
-        except Exception as e:
-            logger.critical(e)
-
-        logger.debug(
-            f"Date loop ({yl[0].strftime('%Y%m%d-%H%M')}:{yl[-1].strftime('%Y%m%d-%H%M')}) took {round(time.time() - info_t_yl_ymd)} s.")
-        _exit()
+    try:
+        if n_workers > 1:
+            ds_collection = _process_periods_in_parallel(ymd, n_workers, **period_kwargs)
+        else:
+            ds_collection = [_process_period(yl, **period_kwargs) for yl in ymd]
+    finally:
+        if output_folderpath is not None:
+            _clear_unfinished(output_folderpath, run_time)
+    ds_collection = [ds for ds in ds_collection if ds is not None]
     
     logger.debug(f'End date loop at {round(time.time() - info_t_start)} s.')
     logger.debug(f"integration_period: {integration_period}.")

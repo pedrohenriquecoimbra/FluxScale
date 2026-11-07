@@ -39,6 +39,7 @@ dependencies = [
     "PyYAML",
     "xarray",
     "dask",
+    "joblib>=1.3",
     "regorator",
 ]
 [project.optional-dependencies]

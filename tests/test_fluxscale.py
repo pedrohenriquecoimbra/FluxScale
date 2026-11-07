@@ -6,7 +6,11 @@ de-duplication, conditional sampling, the DWT forward/inverse round-trip, and
 the conditional-sampling partition wiring (distinct output suffixes, list/None
 inputs). Continuous-wavelet paths are skipped when ``pycwt`` is unavailable.
 """
+import os
+import sys
+
 import dask
+from joblib.externals.loky.process_executor import TerminatedWorkerError
 import numpy as np
 import pandas as pd
 import pytest
@@ -195,14 +199,18 @@ def test_data_run_average_without_formulas():
     assert "w" in handlers.data_run(_raw_dataset(), [], fs=20, average=True)
 
 
-@pytest.mark.filterwarnings("ignore:Level value of")
-def test_process_saves_the_averaged_classes(tmp_path):
+def _write_raw_files(folder, *stamps):
     rng = np.random.default_rng(11)
     header = "\n".join(["legend"] * 9 + ["  ".join(["u", "v", "w", "ts", "co2", "h2o"])])
-    for stamp in ("20220513-0030", "20220513-0100"):
-        np.savetxt(tmp_path / f"{stamp}_raw_dataset.txt",
+    for stamp in stamps:
+        np.savetxt(folder / f"{stamp}_raw_dataset.txt",
                    rng.standard_normal((512, 6)).cumsum(axis=0),
                    header=header, comments="")
+
+
+@pytest.mark.filterwarnings("ignore:Level value of")
+def test_process_saves_the_averaged_classes(tmp_path):
+    _write_raw_files(tmp_path, "20220513-0030", "20220513-0100")
 
     ds = handlers.process("20220513T0000-20220513T0100", 30, str(tmp_path), 20,
                           covariance=["w*co2|w*h2o"], processing_time_duration="1h",
@@ -213,6 +221,103 @@ def test_process_saves_the_averaged_classes(tmp_path):
     # the classes split the product between them
     classes = [f"csp_wco2{a}wh2o{b}" for a in "+-" for b in "+-"]
     np.testing.assert_allclose(sum(ds[c] for c in classes), ds["csp_wco2"], atol=1e-12)
+
+
+TWO_PERIODS = ("20220513T0000-20220513T0200", 30)
+TWO_PERIODS_KWARGS = dict(covariance=["w*co2|w*h2o"], processing_time_duration="1h")
+
+
+def _two_periods(tmp_path):
+    _write_raw_files(tmp_path, "20220513-0030", "20220513-0100",
+                     "20220513-0130", "20220513-0200")
+    return (*TWO_PERIODS, str(tmp_path), 20)
+
+
+@pytest.mark.filterwarnings("ignore:Level value of", "ignore:index 0 is out of bounds")
+def test_process_in_parallel_matches_the_serial_run(tmp_path):
+    args = _two_periods(tmp_path)
+    folders = {name: tmp_path / name for name in ("serial", "parallel")}
+
+    serial = handlers.process(*args, output_folderpath=str(folders["serial"]),
+                              **TWO_PERIODS_KWARGS)
+    parallel = handlers.process(*args, output_folderpath=str(folders["parallel"]),
+                                n_jobs=2, **TWO_PERIODS_KWARGS)
+
+    assert parallel.sizes["TIMESTAMP"] == 4
+    xr.testing.assert_identical(parallel, serial)
+    saved = {name: sorted(f.name.rsplit("_", 1)[0] for f in
+                          (folder / "wavelet_full_cospectra").iterdir())
+             for name, folder in folders.items()}
+    assert len(saved["parallel"]) == 2
+    assert saved["parallel"] == saved["serial"]
+
+
+@pytest.mark.filterwarnings("ignore:Level value of", "ignore:index 0 is out of bounds")
+def test_process_in_parallel_logs_what_the_workers_log(tmp_path):
+    out = tmp_path / "out"
+    handlers.process(*_two_periods(tmp_path), output_folderpath=str(out),
+                     n_jobs=2, **TWO_PERIODS_KWARGS)
+    log = next((out / "log").glob("current_*.log")).read_text()
+    assert "20220513003000 reading" in log
+    assert "20220513013000 reading" in log
+
+
+@pytest.mark.filterwarnings("ignore:Level value of", "ignore:index 0 is out of bounds")
+def test_process_in_parallel_uses_readers_registered_while_running(tmp_path, monkeypatch):
+    reader = readers.READERS.get("ep_raw_lvl")
+    monkeypatch.setitem(readers.READERS.available, "local", lambda path: reader(path))
+    ds = handlers.process(*_two_periods(tmp_path), reader_method="local",
+                          output_folderpath=str(tmp_path / "out"),
+                          n_jobs=2, **TWO_PERIODS_KWARGS)
+    assert ds.sizes["TIMESTAMP"] == 4
+
+
+def test_process_leaves_no_marker_when_a_worker_dies(tmp_path, monkeypatch):
+    monkeypatch.setitem(readers.READERS.available, "dying", lambda path: os._exit(1))
+    out = tmp_path / "out"
+    with pytest.raises(TerminatedWorkerError):
+        handlers.process(*_two_periods(tmp_path), reader_method="dying",
+                         output_folderpath=str(out), n_jobs=2, **TWO_PERIODS_KWARGS)
+    assert not list(out.rglob("*.inprogress"))
+
+
+def test_clear_unfinished_only_touches_the_unfinished_files_of_the_run(tmp_path):
+    folder = tmp_path / "wavelet_full_cospectra"
+    folder.mkdir()
+    kept = ["a_1.nc", "b_2.nc", "b_2.nc.inprogress"]
+    for name in kept + ["c_1.nc", "c_1.nc.inprogress", "d_1.nc.inprogress"]:
+        (folder / name).touch()
+    handlers._clear_unfinished(str(tmp_path), "1")
+    assert sorted(f.name for f in folder.iterdir()) == kept
+
+
+@pytest.mark.filterwarnings("ignore:Level value of", "ignore:index 0 is out of bounds")
+def test_process_without_output_folder_returns_the_periods(tmp_path):
+    ds = handlers.process(*_two_periods(tmp_path), **TWO_PERIODS_KWARGS)
+    assert ds.sizes["TIMESTAMP"] == 4
+
+
+def test_process_rejects_an_unknown_reader_at_once(tmp_path):
+    with pytest.raises(KeyError, match="nope"):
+        handlers.process(*_two_periods(tmp_path), reader_method="nope",
+                         **TWO_PERIODS_KWARGS)
+
+
+@pytest.mark.parametrize("entry_point, target", [
+    ("run", "process"), ("main", "process"), ("eddypro_run", "run_from_eddypro")])
+def test_cli_passes_n_jobs_on(monkeypatch, entry_point, target):
+    class Stop(Exception):
+        pass
+
+    def stop(**kwargs):
+        assert kwargs["n_jobs"] == 3
+        raise Stop
+
+    monkeypatch.setattr(wmain, "_init_logging", lambda *args: None)
+    monkeypatch.setattr(wmain.handlers, target, stop)
+    monkeypatch.setattr(sys, "argv", ["fluxscale", "-j", "3"])
+    with pytest.raises(Stop):
+        getattr(wmain, entry_point)()
 
 
 # --------------------------------------------------------------------------- #

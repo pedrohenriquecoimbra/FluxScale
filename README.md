@@ -78,6 +78,15 @@ data = ...
 fluxscale.data_run(data, ...)
 ```
 
+Periods (`processing_time_duration`) do not depend on each other, so several can
+run at once, each in its own process, with the same result:
+```python
+fluxscale.process(..., n_jobs=4)  # -1 for one per CPU
+```
+On the command line, use `--n_jobs 4`. Choose it by memory rather than by CPUs:
+each worker holds a whole period, about 9 GB for a day of 20 Hz data. Each period
+logs when it ends.
+
 ### Low frequencies over long records (deconstructed cascade)
 
 The regular pipeline processes one averaging window at a time, so it cannot

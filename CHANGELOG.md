@@ -7,8 +7,17 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Added
+
+- `process(n_jobs=...)` (`-j`/`--n_jobs` on the command line) processes several
+  periods at once in worker processes, through the new `joblib` dependency. The
+  result is the same as one at a time, the default. Each worker holds a whole
+  period in memory, and each period logs when it ends.
+
 ### Changed
 
+- `process` raises at once on an unknown `reader_method`, instead of logging an
+  error for each file and returning an empty Dataset.
 - `fluxscale.core.handlers.open_files_in_folder` now reads the files into memory
   and concatenates them, instead of always opening them lazily with
   `xr.open_mfdataset`, which made one dask chunk per file and variable and was
@@ -19,6 +28,13 @@ breaking changes bump the minor version).
   `load=False` forces either way, and `chunks=` sets the dask chunks of either
   result. The merge rules are now pinned, so the result no longer depends on
   xarray's defaults.
+
+### Fixed
+
+- `process` without an `output_folderpath` returned an empty Dataset, as saving
+  failed; it now returns the periods without saving them.
+- A run stopped by an error or Ctrl-C no longer leaves `.inprogress` markers or
+  incomplete files, which made the next run skip those periods as already done.
 
 ## [0.6.0] - 2026-11-06
 

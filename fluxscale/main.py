@@ -218,6 +218,14 @@ def _add_common_args(parser):
         help="Logging level (e.g., DEBUG, INFO, WARNING)")
 
 
+def _add_process_args(parser):
+    """Add CLI arguments of the entry points that run `handlers.process`."""
+    parser.add_argument(
+        '-j', '--n_jobs', type=int, default=1,
+        help='Periods to process at once, -1 for one per CPU; each needs the '
+             'memory of a whole period (default: 1)')
+
+
 def _finalize(parser):
     """Parse args, set up logging, log the run, and return (args, custom_params).
 
@@ -247,6 +255,7 @@ def eddypro_run():
                         help='Date and time range for processing, format: YYYYMMDDTHHMM-YYYYMMDDTHHMM')
     parser.add_argument('-cov', '--covariance', type=str, nargs='+',
                         help='List of covariances to compute (e.g.: "w*co2", default: None)')
+    _add_process_args(parser)
     _add_common_args(parser)
     args, custom_params = _finalize(parser)
 
@@ -254,6 +263,7 @@ def eddypro_run():
                    "output_folderpath": args.folder,
                    "datetimerange": args.datetimerange,
                    "covariance": args.covariance,
+                   "n_jobs": args.n_jobs,
                    **custom_params}
     handlers.run_from_eddypro(**passed_args)
 
@@ -367,6 +377,7 @@ def run():
                         help='Processing time duration (e.g., "1D" for 1 day) (default: "1D")')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing files (default: False)')
+    _add_process_args(parser)
     _add_common_args(parser)
     args, custom_params = _finalize(parser)
 
@@ -398,6 +409,7 @@ def main():
                         help='Integration period in seconds (default: 1800)')
     parser.add_argument('--overwrite', action='store_true',
                         help='Overwrite existing files (default: False)')
+    _add_process_args(parser)
     _add_common_args(parser)
     args, custom_params = _finalize(parser)
 
