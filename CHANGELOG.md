@@ -13,9 +13,65 @@ breaking changes bump the minor version).
   periods at once in worker processes, through the new `joblib` dependency. The
   result is the same as one at a time, the default. Each worker holds a whole
   period in memory, and each period logs when it ends.
+- `method="modwt"` (`--method modwt` on the command line): the maximal overlap
+  discrete wavelet transform, which has no grid, so that the same turbulence gets
+  the same value wherever it happens. Its levels split the variance and the
+  covariance, but do not add up to the signal, and each sits at the time of what
+  it describes. With the default `fixed_grid`, each period gets the neighbours
+  each level needs, and the samples are kept in
+  `<output_folderpath>/decomposition`, so that a period gets the same result,
+  down to rounding, however the run is cut. See `fluxscale.core.modwt`.
+- `fluxscale.core.cascade.reconstruct_approximation`: what the levels of
+  `reconstruct` leave out.
+- `method="moda"` (`--method moda`): MODWT details, the levels filtered with the
+  square of the `modwt` gain, which add up to the signal with the approximation
+  (`fluxscale.core.modwt.details`). It runs on the fixed grid from the same kept
+  samples as `modwt`, and fluxes use the cross-level rule.
+- `fluxscale.core.handlers.data_compute_flux`: the cross-level flux of a product,
+  level by level, as a density per sample or as window means.
+- `cov_<xy>_filled`: the covariance of the gap-filled signals in each window
+  (ddof=0), which the levels of a flux and `<x*y>_lf` add up to.
+- `attrs['flux_rule']`, `'cross_level'` or `'same_scale'`, on every result.
+  `open_files_in_folder` raises when a folder holds files of both rules, and
+  `process` warns when it writes into such a folder.
+- `fluxscale.core.cascade.reconstruct_signal`: the gap-filled signal of a stretch
+  of the cascade.
+- `values=` on `data_conditional_sampling` and `data_conditional_sampling_mean`:
+  what to put in the classes, whose signs still come from the products.
 
 ### Changed
 
+- **Results differ from earlier versions: fluxes are now cross-level.** With
+  `dwt` and `moda`, and files that are windows, a flux such as `wco2` at level j
+  is `1/2 [cov(w_j, co2) + cov(w, co2_j)]` in each window, instead of the
+  same-scale product `w_j * co2_j`. So the levels and `<x*y>_lf` add up to
+  `cov_<xy>_filled` in every window, which the same-scale products did not. What
+  changes: `<xy>` and `<xy>~` (`csp_` and `_int` forms too) for every product of
+  two variables or more, `ww` and `co2co2` included, which can be negative at
+  deep levels; `<x*y>_lf`, which is now the same rule on the approximations, and
+  is added for every product, such as `w*h2o_lf`; and the classes, which keep the
+  signs of the same-scale products but now hold the flux of each sample, so that
+  they add up to `wco2` again, apart from samples where a sign is zero. With
+  `moda` these are the gap-filled samples, whose levels are zero: in a gappy
+  window the rest can be a large share of the flux, and the partition puts it in
+  `Reco`.
+  `cross_level=False` (`--no_cross_level`) gives the earlier results, bit for
+  bit. Use a new output folder when changing it. `modwt` keeps same-scale
+  products, as its coefficients do not add up to the signal, and so do `cwt` and
+  `fcwt` for now, with a warning. Readers without windows also keep them, with a
+  warning. See "What a flux at one scale is" in the README.
+- `process` now decomposes on a fixed calendar grid by default, so that a period
+  gets the same result however the run is cut into blocks and wherever it starts.
+  **Results differ from earlier versions**, whose blocks sat at different places
+  on the wavelet grid; `fixed_grid=False, cross_level=False` (`--no_fixed_grid
+  --no_cross_level` on the command line) gives them back. Samples are numbered from the Unix epoch and placed by their
+  timestamp: a missing file stays a gap, filled and flagged in `<var>_qc`, as do
+  the ends of the data. The run is decomposed once with the cascade and kept in
+  `<output_folderpath>/decomposition`, and each period reads it back one level at
+  a time, so that memory follows the period and not the number of levels. Other
+  methods than `dwt`, and files that are not one window of the expected length
+  each, use regular blocks, with a warning.
+- `zarr` is now a regular dependency.
 - `process` raises at once on an unknown `reader_method`, instead of logging an
   error for each file and returning an empty Dataset.
 - `fluxscale.core.handlers.open_files_in_folder` now reads the files into memory
@@ -29,8 +85,17 @@ breaking changes bump the minor version).
   result. The merge rules are now pinned, so the result no longer depends on
   xarray's defaults.
 
+### Known issues
+
+- `cwt` and `fcwt`: `universal_wt` passes `log2` scales to the inverse transform,
+  which expects scales in seconds, so each level carries a wrong factor. The
+  levels still add up to the signal only because the approximation is what they
+  leave out. This is why they keep same-scale products for now.
+
 ### Fixed
 
+- A period whose result could not be saved no longer leaves an incomplete file,
+  which made the next run skip it as already done.
 - `process` without an `output_folderpath` returned an empty Dataset, as saving
   failed; it now returns the periods without saving them.
 - A run stopped by an error or Ctrl-C no longer leaves `.inprogress` markers or

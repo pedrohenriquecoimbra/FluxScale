@@ -126,7 +126,7 @@ def _sum_by_code(code, x, n_codes):
 
 
 @np.errstate(invalid='ignore')  # complex NaNs in comparisons, 0/0 with nothing to average
-def conditional_sampling_mean(data, groups, dim):
+def conditional_sampling_mean(data, groups, dim, values=None):
     """
     Mean over *dim* of each sign class, without building the classes.
 
@@ -145,6 +145,10 @@ def conditional_sampling_mean(data, groups, dim):
       The first name is the variable sampled; every name, the first included, is
       a condition on its sign (c.f. data_conditional_sampling)
     - dim: dimension or list of dimensions to average over
+    - values: optional dict of a sampled name to the values to sum into its
+      classes instead of data[name], whose sign still sets the class (e.g. the
+      cross-level flux density, c.f. handlers.data_compute_flux). It must have
+      the dims of data[name]
 
     Returns:
     - xarray.Dataset with one variable per class, named as in conditional_sampling
@@ -152,35 +156,41 @@ def conditional_sampling_mean(data, groups, dim):
     if not groups:
         return xr.Dataset()
 
+    values = values or {}
     dims = [dim] if isinstance(dim, str) else dim
     conditions = list(dict.fromkeys(name for group in groups for name in group))
-    arrays = xr.broadcast(*[data[name] for name in conditions])
+    sampled = list(dict.fromkeys(group[0] for group in groups if group[0] in values))
+    arrays = xr.broadcast(*[data[name] for name in conditions],
+                          *[values[name] for name in sampled])
 
     kept = [d for d in arrays[0].dims if d not in dims]
     averaged = [d for d in arrays[0].dims if d in dims]
     sizes = arrays[0].sizes
     n_rows = math.prod(sizes[d] for d in kept)
     n_samples = math.prod(sizes[d] for d in averaged)
-    values = {name: array.transpose(*kept, *averaged).values.reshape(n_rows, n_samples)
-              for name, array in zip(conditions, arrays)}
+    signs = {name: array.transpose(*kept, *averaged).values.reshape(n_rows, n_samples)
+             for name, array in zip(conditions, arrays)}
+    summed = dict(signs)
+    summed.update({name: array.transpose(*kept, *averaged).values.reshape(n_rows, n_samples)
+                   for name, array in zip(sampled, arrays[len(conditions):])})
 
     # A class is a base-3 code with one digit per condition: 1 for positive, 0 for
     # negative, 2 for neither. A NaN in the sampled variable only reaches codes
     # where its own digit is 2, which no class reads, so it needs no cleaning.
     digit = {1: 1, -1: 0}
     totals = [np.empty((n_rows, 3 ** len(group)),
-                       dtype=np.result_type(values[group[0]], float))
+                       dtype=np.result_type(summed[group[0]], float))
               for group in groups]
     for row in range(n_rows):
         digits = {name: np.where(x[row] > 0, 1, np.where(x[row] < 0, 0, 2))
-                  for name, x in values.items()}
+                  for name, x in signs.items()}
         for group, total in zip(groups, totals):
             total[row] = _sum_by_code(_base3(digits[name] for name in group),
-                                      values[group[0]][row], total.shape[1])
+                                      summed[group[0]][row], total.shape[1])
 
     means = {}
     for group, total in zip(groups, totals):
-        count = np.count_nonzero(~np.isnan(values[group[0]]), axis=1)
+        count = np.count_nonzero(~np.isnan(summed[group[0]]), axis=1)
         for name, signs in _sign_classes(group, {1: "+", -1: "-"}):
             mean = total[:, _base3(digit[s] for s in signs)] / count
             means[name] = (kept, mean.reshape([sizes[d] for d in kept]))
@@ -189,6 +199,15 @@ def conditional_sampling_mean(data, groups, dim):
 
 def partition_DWCS(data, labelpositive='GPP', labelnegative='Reco', all='wco2',
                   positive='wco2-wh2o+', negative='wco2-wh2o-', NIGHT=None):
+    """
+    Partition *all* into *labelpositive* = positive + negative/2 (0 at night)
+    and *labelnegative* = *all* - *labelpositive*.
+
+    *all* is the cross-level flux when the data have attrs['flux_rule'] ==
+    'cross_level' (c.f. handlers.data_compute_flux). The classes then hold the
+    same flux, sample by sample, and add up to *all* but for samples where a
+    sign is zero. *labelnegative* takes that rest.
+    """
     if isinstance(data, str):
         data = read_file(data)
     else:
@@ -209,6 +228,15 @@ def partition_DWCS(data, labelpositive='GPP', labelnegative='Reco', all='wco2',
 
 def partition_DWCS_H2O(data=None, NEE='NEE', GPP='GPP', Reco='Reco', CO2='wco2',
                   CO2neg_H2Opos='wco2-wh2o+', CO2neg_H2Oneg='wco2-wh2o-', NIGHT=None):
+    """
+    Partition with H2O: GPP = CO2-H2O+ + CO2-H2O-/2 (0 at night), Reco = NEE - GPP.
+
+    NEE is *CO2* (``wco2``), the cross-level flux when the data have
+    attrs['flux_rule'] == 'cross_level' (c.f. handlers.data_compute_flux). The
+    classes then hold the same flux, sample by sample, and add up to NEE but
+    for samples where a sign is zero (with 'moda', the gap-filled samples).
+    Reco takes that rest.
+    """
     if isinstance(data, str):
         data = read_file(data)
     elif data is None:
@@ -234,6 +262,16 @@ def partition_DWCS_H2O(data=None, NEE='NEE', GPP='GPP', Reco='Reco', CO2='wco2',
 def partition_DWCS_CH4(data=None, NEE='NEE', GPP='GPP', Reco='Reco', CO2='wco2', 
                   CO2pos_CH4pos='wco2+wch4+', CO2pos_CH4neg='wco2+wch4-', 
                   CO2neg_CH4pos='wco2-wch4+', CO2neg_CH4neg='wco2-wch4-', NIGHT=None):
+    """
+    Partition with CH4: Reco = CO2+CH4+ + CO2+CH4-/2, GPP = NEE - Reco (0 at
+    night).
+
+    NEE is *CO2* (``wco2``), the cross-level flux when the data have
+    attrs['flux_rule'] == 'cross_level' (c.f. handlers.data_compute_flux). The
+    classes then hold the same flux, sample by sample, and add up to NEE but
+    for samples where a sign is zero (with 'moda', the gap-filled samples).
+    GPP takes that rest by day. At night GPP is 0, so GPP + Reco is not NEE.
+    """
     if isinstance(data, str):
         data = read_file(data)
     elif data is None:
@@ -266,6 +304,17 @@ def partition_DWCS_CO(data=None, NEE='NEE', GPP='GPP', Reco='Reco', ffCO2='ffCO2
                      CO2pos_COpos='wco2+wco+',
                      CO2pos_COneg='wco2+wco-',
                      NIGHT=None):
+    """
+    Partition with H2O and CO: GPP = CO2-H2O+ + CO2-H2O-/3 (0 at night),
+    ffCO2 = CO2+CO+ and Reco = CO2+CO-, and what is left of NEE goes half to
+    Reco, half to ffCO2.
+
+    NEE is *CO2* (``wco2``), the cross-level flux when the data have
+    attrs['flux_rule'] == 'cross_level' (c.f. handlers.data_compute_flux). The
+    classes then hold the same flux, sample by sample, and add up to NEE but
+    for samples where a sign is zero (with 'moda', the gap-filled samples).
+    Reco and ffCO2 take that rest, half each.
+    """
     if isinstance(data, str):
         data = read_file(data)
     elif data is None:

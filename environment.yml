@@ -13,6 +13,7 @@ dependencies:
   - xarray
   - dask
   - joblib>=1.3
+  - zarr
   - pip
   - pip:
       - regorator

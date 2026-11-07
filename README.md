@@ -93,8 +93,8 @@ The regular pipeline processes one averaging window at a time, so it cannot
 resolve scales longer than the window. For that, `fluxscale.core.cascade`
 decomposes arbitrarily long records (years of 20 Hz data) with bounded
 memory, in two stages: chunks are decomposed to `split_level` with overlap
-margins and the coefficients appended to a [zarr](https://zarr.dev) store
-(`pip install fluxscale[cascade]`); the carried approximation — a factor
+margins and the coefficients appended to a [zarr](https://zarr.dev) store;
+the carried approximation — a factor
 `2**split_level` shorter — is then decomposed in memory down to any depth.
 The result is exactly (machine precision) the DWT of the whole record.
 
@@ -120,6 +120,101 @@ in `qc` arrays. Levels sum to the whole-record covariance exactly only when
 deep levels are off (0.2 to 11% of the total on the 3-day FR-Gri sample),
 interior coefficients being unaffected. See `tests/test_cascade.py` for
 exactness guarantees.
+
+### The same result however a run is cut (fixed grid)
+
+The discrete transform keeps one coefficient every `2**level` samples, counted
+from the first sample it is given. A period decomposed in a block of its own
+therefore sits somewhere else on that grid than the same period in a longer
+block, and its energy moves between scales. So `process` uses a fixed grid by
+default: a period gets the same result, bit for bit, whatever the block size and
+wherever the run starts.
+
+Samples are numbered from the Unix epoch and placed by their timestamp. A run
+reads the neighbours of its period on each side (`11 * 2**level` samples with
+`db6`, about 5 hours for level 15 at 20 Hz), decomposes them once with the
+cascade, and each period reads its levels back one at a time. So:
+
+- `processing_time_duration` only sets the memory used, not the result. On the
+  sample, at 20 Hz, a 1-day block peaks at about 1 GiB instead of 6 GiB.
+- A missing file stays a gap, with no row in the result. It is filled for the
+  transform, and every value within its reach is flagged in `<var>_qc`, as are
+  the ends of the data, where there are no neighbours.
+- The decomposition is kept in `<output_folderpath>/decomposition` for the next
+  run of the same period, unless `overwrite=True`. It takes about 13 GiB per
+  year for 3 variables at 20 Hz.
+
+Other methods than `dwt`, `modwt` and `moda`, and files that are not one window
+of the expected length each, use regular blocks instead, with a warning.
+`fixed_grid=False` (`--no_fixed_grid` on the command line) asks for them. With
+`cross_level=False` as well (`--no_fixed_grid --no_cross_level`), it gives the
+results of earlier versions. From one half-hour to the next, a value still depends on where
+that half-hour falls on the grid: mostly single scales, much less their sum.
+
+### Choosing the transform
+
+`method` picks the transform, and `wavelet` its filters (`db6` by default):
+
+| `method` | Transform | Levels |
+|---|---|---|
+| `dwt` (default) | Discrete | Add up to the signal; depend on where a half-hour falls on the grid |
+| `modwt` | Discrete, maximal overlap: coefficients | Split the variance and the covariance, without adding up to the signal; no grid, so the same turbulence gets the same value wherever it happens. Fluxes stay same-scale products |
+| `moda` | Discrete, maximal overlap: details | Add up to the signal, with no grid; filtered with the square of the `modwt` gain |
+| `cwt`, `fcwt` | Continuous | Need `pip install fluxscale[cwt]` or `fluxscale[fcwt]` |
+
+```python
+fluxscale.process(..., method='modwt')   # --method modwt on the command line
+```
+
+With `modwt` and `moda` there is no grid to keep, but each period still reads the neighbours
+it needs (twice those of `dwt`: `2 * 11 * 2**level` samples with `db6`), so a
+period gets the same result, down to rounding, however the run is cut. Gaps and
+the ends of the data are flagged in the same way, out to that same distance. What
+is kept in `<output_folderpath>/decomposition` are the samples, about 14 GiB per
+year for 3 variables at 20 Hz. See `fluxscale.core.modwt`.
+
+### What a flux at one scale is
+
+The levels of `dwt` and `moda` add up to the signal. By default
+(`cross_level=True`), a flux such as `wco2` at level j is the cross-level share
+of the covariance of each window:
+
+```
+F_j = 1/2 [cov(w_j, co2) + cov(w, co2_j)]
+```
+
+where `w` and `co2` are the whole gap-filled signals of the window. For n
+variables, `F_j = (1/n) sum_k mean(x_k,j' * prod_{i != k} x_i')`, with `'` the
+anomaly from the window mean. Then:
+
+- In every window, the levels plus `w*co2_lf` (the same rule on the
+  approximations) add up to `cov_wco2_filled`, the covariance of the gap-filled
+  signals with ddof=0. In a window without gaps it is `cov_wco2 * (N-1)/N`; in a
+  window with gaps it differs more, as the gaps are filled. This holds for every product of the
+  formulas, `ww` and `wh2o` included, each with its own `<x*y>_lf`.
+- The classes (`wco2+wh2o-` and so on) take their sign from the same-scale
+  products `w_j * co2_j` and `w_j * h2o_j`, as before, and their value from the
+  flux of the same sample. So they add up to `wco2`, except for samples where a
+  sign is exactly zero. With `dwt` this is rare. With `moda`, the levels of a
+  gap-filled stretch are set to zero (see `modwt.clean`), so the filled samples
+  are in no class, while their flux is not zero. In a gappy window this rest can
+  be a large share of the flux (all of it when one variable of the condition is
+  missing in the whole window). The partition puts it in `Reco = NEE - GPP`, so
+  check `<var>_qc` before using such windows.
+- Variance rows (`ww`, `co2co2`) can be negative at deep levels. Deep levels
+  are noisier than same-scale products.
+- A sum over part of the levels, such as the `_int` cut of `integration_period`,
+  is not the covariance of a band-passed signal.
+- `modwt` coefficients do not add up to the signal: they keep same-scale
+  products, and so do `cwt` and `fcwt` for now, with a warning.
+- Without a window dim (readers that give `TIMESTAMP` only), there is no window
+  covariance to split, and the products stay same-scale, with a warning.
+
+`cross_level=False` (`--no_cross_level` on the command line) gives the
+same-scale products of earlier versions, `w_j * co2_j`. Each result says which
+rule it has in `attrs['flux_rule']`, `'cross_level'` or `'same_scale'`.
+`open_files_in_folder` refuses a folder whose files have different rules, so
+use a new output folder when changing it.
 
 ### Saving Results
 
@@ -152,7 +247,7 @@ split = fluxscale.decompose(data, "w*co2", fs=20)    # the scales themselves, as
 fluxscale.export_midi(data, "w*co2", "flux.mid")     # the same music for a DAW (pip install "fluxscale[midi]")
 ```
 
-```data``` can be an array, a ```pandas.Series``` or an ```xarray.DataArray```, or a Dataset, DataFrame or dictionary holding the variable. Products such as ```"w*co2"``` and wavelet-domain outputs of ```data_run``` such as ```"wco2-wh2o+"``` work too.
+```data``` can be an array, a ```pandas.Series``` or an ```xarray.DataArray```, or a Dataset, DataFrame or dictionary holding the variable. Products such as ```"w*co2"``` and wavelet-domain outputs of ```data_run``` such as ```"wco2-wh2o+"``` work too. A product such as ```"w*co2"``` is played as the same-scale product of its levels, which is not the cross-level ```wco2``` of ```data_run``` (see What a flux at one scale is).
 
 Why level 1 is needed: speed and pitch are tied together in a waveform. Playing half an hour of the FR-Gri sample in 30 s leaves only 3% (```h2o```) to 46% (```w```) of its variance audible. Wavelets untie them, so that scales can be moved into the hearing range without changing how fast time runs.
 
@@ -212,6 +307,12 @@ Web apps built on this are in [FluxSound](https://github.com/pedrohenriquecoimbr
 
 
 ### Output Format
+
+The NetCDF files of `process` hold, along `TIMESTAMP` and `natural_frequency`,
+`csp_<xy>` (the flux at each level), its classes such as `csp_wco2+wh2o-`,
+`<x*y>_lf` (the flux below the deepest level), `cov_<xy>_filled` (what they add
+up to) and the raw `cov_<xy>`. `attrs['flux_rule']` says how a flux is split
+over the levels (see What a flux at one scale is).
 
 The output file for the wavelet-based (co)spectra analysis is structured as follows:
 

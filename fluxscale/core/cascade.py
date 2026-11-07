@@ -950,3 +950,71 @@ def reconstruct(store, var, levels=None, start=0, stop=None):
     out.attrs.update({'method': 'dwt', 'wavelet': wavelet, 'mode': a['mode'],
                       'fs': a['fs']})
     return out
+
+
+def _span_and_carry(store, var, start, stop):
+    """
+    The span on the grid of split_level that reconstruct_approximation and
+    reconstruct_signal rebuild for the samples [start, stop), and the carry
+    over it. Both use this one span, so they agree to the last bit.
+    """
+    store = _as_store(store, mode='r')
+    a = store.attrs
+    n, split, wavelet = a['n_samples'], a['split_level'], a['wavelet']
+    stop = n if stop is None else int(stop)
+    start = int(start)
+    if not 0 <= start < stop <= n:
+        raise ValueError(f"Invalid sample range [{start}, {stop}) for n={n}.")
+    g = store[var]
+    if int(g.attrs['n_done']) != n:
+        raise ValueError(f"Variable '{var}' is not fully decomposed yet.")
+
+    step = 2 ** split
+    margin = cascade_margin(split, wavelet)
+    a0 = ((start - margin) // step) * step
+    b0 = -(-(stop + margin) // step) * step
+    carry = _read_wrapped(g['carry'], a0 >> split, b0 >> split, n >> split)
+    return g, n, split, wavelet, start, stop, a0, b0, carry
+
+
+def reconstruct_approximation(store, var, start=0, stop=None):
+    """
+    function: what the levels of reconstruct leave out, that is the
+        approximation at split_level, for the sample window [start, stop):
+        adding it to every stage-1 level gives back the gap-filled signal.
+    call: reconstruct_approximation()
+    Input:
+        store: CascadeStore (or path to one)
+        var: variable name
+        start, stop: sample range on the nominal grid (default whole record)
+    Return:
+        values: numpy array of the samples of [start, stop)
+    """
+    _, _, split, wavelet, start, stop, a0, b0, carry = _span_and_carry(
+        store, var, start, stop)
+    span = b0 - a0
+    coeffs = [carry] + [np.zeros(span >> i) for i in range(split, 0, -1)]
+    rec = pywt.waverec(coeffs, wavelet, mode=MODE)
+    return rec[start - a0: stop - a0].copy()
+
+
+def reconstruct_signal(store, var, start=0, stop=None):
+    """
+    function: the gap-filled signal for the sample window [start, stop), in
+        one inverse transform of the carry and every stage-1 level. It is the
+        sum of the levels of reconstruct and of reconstruct_approximation, to
+        rounding, and it does not depend on [start, stop) to the last bit
+    call: reconstruct_signal()
+    Input:
+        store: CascadeStore (or path to one)
+        var: variable name
+        start, stop: sample range on the nominal grid (default whole record)
+    Return:
+        values: numpy array of the samples of [start, stop)
+    """
+    g, n, split, wavelet, start, stop, a0, b0, carry = _span_and_carry(
+        store, var, start, stop)
+    coeffs = [carry] + [_read_wrapped(g[f'cD{i:02d}'], a0 >> i, b0 >> i, n >> i)
+                        for i in range(split, 0, -1)]
+    rec = pywt.waverec(coeffs, wavelet, mode=MODE)
+    return rec[start - a0: stop - a0].copy()

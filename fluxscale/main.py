@@ -82,7 +82,7 @@ def parse_args():
     # parser.add_argument('-db', '--deadband', type=str, nargs='+')
     parser.add_argument('-cov', '--covariance', type=str, nargs='+',
                         help='List of covariances to compute (default: None)')
-    parser.add_argument('--method', type=str, default='dwt', choices=['cov', 'dwt', 'cwt'],
+    parser.add_argument('--method', type=str, default='dwt', choices=['cov', 'dwt', 'modwt', 'moda', 'cwt'],
                         help='Method to use for wavelet processing (default: "dwt")')
     parser.add_argument('--wave_mother', type=str, default='db6',
                         help='Mother wavelet to use for wavelet processing (default: "db6")')
@@ -224,6 +224,15 @@ def _add_process_args(parser):
         '-j', '--n_jobs', type=int, default=1,
         help='Periods to process at once, -1 for one per CPU; each needs the '
              'memory of a whole period (default: 1)')
+    parser.add_argument(
+        '--no_fixed_grid', dest='fixed_grid', action='store_false',
+        help='Decompose each block on its own, instead of on the fixed calendar '
+             'grid that gives a period the same result however the run is cut')
+    parser.add_argument(
+        '--no_cross_level', dest='cross_level', action='store_false',
+        help='Keep the same-scale products of earlier versions, instead of '
+             'the cross-level flux whose levels add up to the covariance of '
+             'each window')
 
 
 def _finalize(parser):
@@ -264,6 +273,8 @@ def eddypro_run():
                    "datetimerange": args.datetimerange,
                    "covariance": args.covariance,
                    "n_jobs": args.n_jobs,
+                   "fixed_grid": args.fixed_grid,
+                   "cross_level": args.cross_level,
                    **custom_params}
     handlers.run_from_eddypro(**passed_args)
 

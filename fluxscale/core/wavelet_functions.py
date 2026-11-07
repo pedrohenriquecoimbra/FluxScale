@@ -50,6 +50,7 @@ except ImportError:
     fcwt = None
 
 # project modules
+from . import modwt
 
 logger = logging.getLogger(__name__)
 
@@ -353,7 +354,11 @@ def universal_wt(signal, method='dwt', fs=20, f0=1/(3*60*60), f1=10, fn=180,
     call: universal_wt()
     Input:
         signal: 1D array
-        method: 'dwt', 'cwt', 'fcwt' (cwt but uses fast algorithm)
+        method: 'dwt', 'modwt', 'moda', 'cwt', 'fcwt' (cwt but uses fast
+            algorithm). With 'modwt', levels are MODWT coefficients, which split
+            the variance instead of adding up to the signal. With 'moda', they
+            are MODWT details, which add up to the signal with the
+            approximation (see modwt)
         fs: sampling rate (Hz)
         f0: highest scale (becomes level for DWT)
         f1: lowest scale (2x sampling rate)
@@ -366,7 +371,7 @@ def universal_wt(signal, method='dwt', fs=20, f0=1/(3*60*60), f1=10, fn=180,
         sj: scales 
     """
     assert method in [
-        'dwt', 'cwt', 'fcwt'], "Method not found. Available methods are: dwt, cwt, fcwt"
+        'dwt', 'modwt', 'moda', 'cwt', 'fcwt'], "Method not found. Available methods are: dwt, modwt, moda, cwt, fcwt"
 
     if method == 'fcwt':
         if fcwt is not None:
@@ -412,6 +417,20 @@ def universal_wt(signal, method='dwt', fs=20, f0=1/(3*60*60), f1=10, fn=180,
             sj = [(fs*(2**-float(_l))) for _l in np.arange(1, lvl+2, 1)]
             wave = __dwt__(signal, level=lvl, **kwargs)
 
+        elif method == "modwt":
+            """Run Maximal Overlap Discrete Wavelet Transform"""
+            lvl = kwargs.pop('level', int(np.ceil(np.log2(fs/f0))))
+            sj = [(fs*(2**-float(_l))) for _l in np.arange(1, lvl+1, 1)]
+            wave, approximation = modwt.transform(
+                signal, lvl, kwargs.get('wavelet', modwt.DEFAULT_WAVELET))
+
+        elif method == "moda":
+            """Run MODWT details, which add up to the signal"""
+            lvl = kwargs.pop('level', int(np.ceil(np.log2(fs/f0))))
+            sj = [(fs*(2**-float(_l))) for _l in np.arange(1, lvl+1, 1)]
+            wave, approximation = modwt.details(
+                signal, lvl, kwargs.get('wavelet', modwt.DEFAULT_WAVELET))
+
     if iwt:
         # `sj` was computed by the forward pass above (wt=True is required here),
         # so do NOT overwrite it from kwargs. Drop any stray 'sj' the caller may
@@ -436,7 +455,7 @@ def universal_wt(signal, method='dwt', fs=20, f0=1/(3*60*60), f1=10, fn=180,
 
     if coi:
         # Cone of Influence (COI)
-        if method == "dwt":
+        if method in ("dwt", "modwt", "moda"):
             coneoi = np.ones_like(wave)
         else:
             coneoi = cone_of_influence_mask(sj=sj, dt=1/fs,

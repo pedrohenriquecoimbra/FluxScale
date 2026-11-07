@@ -356,7 +356,9 @@ def _band_names(freqs):
 def _load_product(data, variable, fs, wavelet):
     """A product as its cross-scalogram, as in ``data_compute_product``.
 
-    That is the wavelet-domain flux density: it sums over scales to the flux.
+    That is the same-scale product of the levels: it sums over scales to the
+    product of the signals over the record. It is not the cross-level ``wco2``
+    of ``data_run`` (see ``handlers.data_compute_flux``).
     """
     names = formula_to_vars(variable).xy
     series = [_pick(data, name) for name in names]

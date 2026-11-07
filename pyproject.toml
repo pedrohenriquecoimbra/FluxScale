@@ -40,13 +40,15 @@ dependencies = [
     "xarray",
     "dask",
     "joblib>=1.3",
+    "zarr",
     "regorator",
 ]
 [project.optional-dependencies]
 cwt = ["pycwt"]
 fcwt = ["pycwt", "fcwt"]
 midi = ["mido>=1.3"]
-cascade = ["zarr"]
+# zarr is a regular dependency now; kept for `pip install fluxscale[cascade]`
+cascade = []
 
 [project.scripts]
 fluxscale-eddypro_run = "fluxscale.main:eddypro_run"

@@ -41,6 +41,8 @@ import warnings
 import time
 import datetime
 import glob
+import shutil
+import tempfile
 
 # 3rd party modules
 import dask
@@ -50,7 +52,7 @@ import numpy as np
 import xarray as xr
 
 # project modules
-from . import commons
+from . import cascade, commons, grid
 from ..io import READERS
 # from .read_data import loaddatawithbuffer
 from .wavelet_functions import universal_wt, formula_to_vars, prepare_signal
@@ -65,6 +67,7 @@ __all__ = [
     "decompose_variables",
     "data_statistics",
     "data_compute_product",
+    "data_compute_flux",
     "data_conditional_sampling",
     "data_conditional_sampling_mean",
     "data_partition",
@@ -86,8 +89,25 @@ __all__ = [
 ]
 
 
+# attrs[FLUX_RULE] says how a result splits a flux over the levels: CROSS_LEVEL
+# or SAME_SCALE (c.f. data_compute_flux). A result without it is SAME_SCALE.
+FLUX_RULE = 'flux_rule'
+CROSS_LEVEL = 'cross_level'
+SAME_SCALE = 'same_scale'
+# Methods whose levels add up to the signal, for the cross-level rule
+CROSS_LEVEL_METHODS = ('dwt', 'moda')
+# Suffix of the gap-filled signal that decompose_variables keeps for the flux.
+# It is a helper: _run_decomposed takes it out, and it never reaches an output.
+SIGNAL = '_signal'
+
+
+def _window_dims(data):
+    """The dims of an averaging window: all but TIMESTAMP and natural_frequency."""
+    return [d for d in data.dims if d not in {'TIMESTAMP', 'natural_frequency'}]
+
+
 def decompose_variables(data, variables=None,
-                        nan_tolerance=.3, **kwargs):
+                        nan_tolerance=.3, keep_signal=False, **kwargs):
     """
     Calculate data decomposed with wavelet transform for xarray.Dataset.
 
@@ -95,6 +115,8 @@ def decompose_variables(data, variables=None,
     - data: xarray.Dataset
     - variables: list of variable names to decompose (defaults to ['w', 'co2'])
     - nan_tolerance: tolerance for NaN values
+    - keep_signal: also keep the gap-filled signal of each variable, as
+      <var>_signal, for data_compute_flux
     - **kwargs: additional arguments for universal_wt
 
     Returns:
@@ -131,7 +153,10 @@ def decompose_variables(data, variables=None,
                  'approximation': f'{var}_lf',
                  'coi': f'{var}_qc'}
             )
-            wt_signal = wt_signal.drop_vars('signal')
+            if keep_signal:
+                wt_signal = wt_signal.rename({'signal': f'{var}{SIGNAL}'})
+            else:
+                wt_signal = wt_signal.drop_vars('signal')
             wt_signal[f'{var}_qc'] = wt_signal[f'{var}_qc'].where(
                 ready_signal.signan != 0, 0)
             result = xr.merge([wt_signal, result], compat='override')
@@ -152,22 +177,23 @@ def data_statistics(data, formula='w*co2'):
     xy_name = ''.join(formulavar.xy)
 
     if len(formulavar.xy) == 2:
+        window = _window_dims(data)
         data[f'cov_{xy_name}'] = xr.cov(
-            data[formulavar.xy[0]], data[formulavar.xy[1]], 
-            dim=[d for d in data.dims if d not in {
-                'TIMESTAMP', 'natural_frequency'}])
+            data[formulavar.xy[0]], data[formulavar.xy[1]], dim=window)
 
         data[f'adv_{xy_name}'] = (
-            data[formulavar.xy[0]].mean(dim=[d for d in data.dims if d not in {
-                'TIMESTAMP', 'natural_frequency'}]) *
-            data[formulavar.xy[1]].mean(dim=[d for d in data.dims if d not in {
-                'TIMESTAMP', 'natural_frequency'}]))
+            data[formulavar.xy[0]].mean(dim=window) *
+            data[formulavar.xy[1]].mean(dim=window))
     return data
 
 
 def data_compute_product(data, formula='w*co2|w*h2o', name=None):
     """
     Calculate the product of variables specified by a formula for xarray.Dataset.
+
+    The product is taken level by level (same-scale): it gives the signs that
+    set the classes of conditional sampling. A name already in *data* is kept
+    as it is.
 
     Parameters:
     - data: xarray.Dataset
@@ -200,6 +226,100 @@ def data_compute_product(data, formula='w*co2|w*h2o', name=None):
     return data
 
 
+def _anomaly(values, window):
+    return values - values.mean(window)
+
+
+def _flux_density(parts, whole, window, average):
+    """
+    (1/n) sum_k part_k' * prod_{i != k} whole_i', with conj on positions >= 1;
+    *whole* is already in anomalies and conjugated. With *average*, the mean
+    over *window*, one natural_frequency at a time.
+    """
+    if average and parts[0].sizes.get('natural_frequency', 1) > 1:
+        return xr.concat(
+            [_flux_density([p.isel(natural_frequency=[i]) for p in parts],
+                           whole, window, True)
+             for i in range(parts[0].sizes['natural_frequency'])],
+            dim='natural_frequency')
+    total = None
+    for k, part in enumerate(parts):
+        term = _anomaly(part, window)
+        if k and np.iscomplexobj(term):
+            term = term.conj()
+        for i, other in enumerate(whole):
+            if i != k:
+                term = term * other
+        total = term if total is None else total + term
+    total = total / len(parts)
+    return total.mean(window) if average else total
+
+
+def data_compute_flux(data, formula='w*co2', average=False, levels=True, low=True):
+    """
+    Cross-level flux of a product of n >= 2 variables, level by level.
+
+    With x_1..x_n the gap-filled signals, L_kj the level j of x_k (levels and
+    approximation add up to the signal) and a' = a - mean(a) over the window,
+    the density of level j at each sample is
+
+        d_j = (1/n) sum_k L_kj' * prod_{i != k} x_i'
+
+    with conj on the factors at positions >= 1, as in data_compute_product.
+    For two variables, the window mean of d_j is
+    (cov(x_j, y) + cov(x, y_j)) / 2. The densities of all levels and of the
+    approximation add up to prod x_i', sample by sample, so their window
+    means add up to cov_<xy>_filled, the covariance of the gap-filled signals
+    (ddof=0). A sum over part of the levels is not the covariance of a
+    band-passed signal.
+
+    Parameters:
+    - data: xarray.Dataset with the levels <c> (natural_frequency, ...), the
+      approximations <c>_lf and the gap-filled signals <c>_signal, with a
+      window dim besides TIMESTAMP (e.g. 'ns')
+    - formula: string or object specifying the formula (e.g., 'w*co2'); only
+      its first product is used
+    - average: return window means instead of densities
+    - levels: compute <xy> from the levels
+    - low: compute <x*y>_lf from the approximations, and cov_<xy>_filled
+
+    Returns:
+    - xarray.Dataset with <xy>, <x*y>_lf and cov_<xy>_filled (always a window
+      mean); empty if the formula has fewer than 2 variables
+
+    Raises:
+    - ValueError: if *data* has no window dim
+    - KeyError: if a <c>_signal is missing
+    """
+    formulavar = formula_to_vars(formula) if isinstance(formula, str) else formula
+    xy = formulavar.xy
+    out = xr.Dataset()
+    if len(xy) < 2:
+        return out
+    window = _window_dims(data)
+    if not window:
+        raise ValueError("data_compute_flux needs a window dim besides "
+                         "TIMESTAMP and natural_frequency.")
+    whole = []
+    for i, c in enumerate(xy):
+        if f'{c}{SIGNAL}' not in data:
+            raise KeyError(f"data_compute_flux needs {c}{SIGNAL}, the "
+                           f"gap-filled signal of {c}.")
+        anomaly = _anomaly(data[f'{c}{SIGNAL}'], window)
+        whole.append(anomaly.conj() if i and np.iscomplexobj(anomaly) else anomaly)
+    name = ''.join(xy)
+    if levels:
+        out[name] = _flux_density([data[c] for c in xy], whole, window, average)
+    if low:
+        out['*'.join(xy) + '_lf'] = _flux_density(
+            [data[f'{c}_lf'] for c in xy], whole, window, average)
+        product = whole[0]
+        for other in whole[1:]:
+            product = product * other
+        out[f'cov_{name}_filled'] = product.mean(window)
+    return out
+
+
 def _condsamp_names(formula):
     """Names of the variables of a formula: the one sampled, then its conditions."""
     formulavar = formula_to_vars(formula) if isinstance(formula, str) else formula
@@ -207,13 +327,19 @@ def _condsamp_names(formula):
                                        for cs in formulavar.condsamp_pair]
 
 
-def data_conditional_sampling(data, formula='w*co2|w*h2o'):
+def data_conditional_sampling(data, formula='w*co2|w*h2o', values=None):
     """
     Calculate conditional sampling from a formula for xarray.Dataset.
+
+    The class of a sample comes from the signs of the products of the formula
+    (c.f. data_compute_product). The values put in the classes are the
+    product itself, or *values*.
 
     Parameters:
     - data: xarray.Dataset
     - formula: string or object specifying the formula (e.g., 'w*co2|w*h2o')
+    - values: optional dict of the sampled name (e.g. 'wco2') to the values to
+      put in its classes, such as the flux density of data_compute_flux
 
     Returns:
     - xarray.Dataset with the conditional sampling results
@@ -227,16 +353,17 @@ def data_conditional_sampling(data, formula='w*co2|w*h2o'):
 
     # Extract data arrays for conditional sampling
     data_arrays = [data[names[0]]] + [data[n] for n in names[1:]]
+    sampled = (values or {}).get(names[0], data_arrays[0])
 
     # Perform conditional sampling
     φc = conditional_sampling(
-        data_arrays[0], *[da for da in data_arrays[:]], names=names, label={1: "+", -1: "-"}
+        sampled, *[da for da in data_arrays[:]], names=names, label={1: "+", -1: "-"}
     ) if names else {}
 
     return φc
 
 
-def data_conditional_sampling_mean(data, formulas, dim):
+def data_conditional_sampling_mean(data, formulas, dim, values=None):
     """
     Calculate the mean of the conditional sampling of each formula for xarray.Dataset.
 
@@ -247,17 +374,26 @@ def data_conditional_sampling_mean(data, formulas, dim):
     - data: xarray.Dataset holding the products named in the formulas
     - formulas: list of strings or objects specifying the formulas (e.g., ['w*co2|w*h2o'])
     - dim: dimension or list of dimensions to average over
+    - values: optional dict of a sampled name to the values to put in its
+      classes (c.f. data_conditional_sampling)
 
     Returns:
     - xarray.Dataset with the averaged conditional sampling results
     """
-    return conditional_sampling_mean(data, [_condsamp_names(f) for f in formulas], dim)
+    return conditional_sampling_mean(
+        data, [_condsamp_names(f) for f in formulas], dim, values=values)
 
 
 def data_partition(data, dst=None,
                    id_columns=None,
                    variables_available=None, **kwargs):
     """Apply every applicable wavelet conditional-sampling partition to *data*.
+
+    NEE is ``wco2``. With the cross-level rule (attrs['flux_rule']), the classes
+    hold the flux density of the same samples, so they add up to NEE but for
+    the samples where a sign is zero, and Reco = NEE - GPP takes that rest.
+    With 'moda' these are the gap-filled samples, so in a gappy window the
+    rest, and so Reco, can take a large share of NEE.
 
     Each gas-channel partition is attempted independently ("best effort"): a
     channel whose required variables are absent is skipped and logged at DEBUG,
@@ -365,6 +501,9 @@ def open_files_in_folder(path, load=None, chunks=None):
 
     Raises:
         OSError: If *path* has no ``*.nc`` file.
+        ValueError: If the files were made with different flux rules
+            (attrs['flux_rule'], missing meaning 'same_scale'), whose numbers
+            cannot be put together.
     """
     files = sorted(glob.glob(os.path.join(
         os.path.abspath(os.path.expanduser(path)), '*.nc')))
@@ -381,11 +520,24 @@ def open_files_in_folder(path, load=None, chunks=None):
                 "%d files (%.1f GiB): opening them lazily, which is slower. "
                 "Use load=True to read them into memory; peak RAM is a few "
                 "times their size.", len(files), nbytes / 2**30)
+    rules = []
+
+    def note_rule(ds):
+        rules.append(ds.attrs.get(FLUX_RULE, SAME_SCALE))
+        return ds
+
     if load:
-        ds = xr.combine_nested(
-            [xr.load_dataset(f) for f in files], **combine_kwargs)
+        datasets = [note_rule(xr.load_dataset(f)) for f in files]
+        _check_one_rule(rules, path)
+        ds = xr.combine_nested(datasets, **combine_kwargs)
         return ds if chunks is None else ds.chunk(chunks)
-    ds = xr.open_mfdataset(files, combine='nested', **combine_kwargs)
+    ds = xr.open_mfdataset(files, combine='nested', preprocess=note_rule,
+                           **combine_kwargs)
+    try:
+        _check_one_rule(rules, path)
+    except ValueError:
+        ds.close()
+        raise
     if chunks is None:
         # Small files merge into few chunks and large ones split, so the chunks
         # do not grow with the folder. Not 'auto', which refuses text variables.
@@ -398,17 +550,26 @@ def open_files_in_folder(path, load=None, chunks=None):
     return out
 
 
+def _check_one_rule(rules, path):
+    counts = {rule: rules.count(rule) for rule in sorted(set(rules))}
+    if len(counts) > 1:
+        raise ValueError(
+            f"The files in {path!r} were made with different flux rules "
+            f"({', '.join(f'{n} {r}' for r, n in counts.items())}), and cannot "
+            "be put together. Run them again into a new output folder.")
+
+
 def data_average_dims(data, id_cols=None):
     if id_cols is None:
-        id_cols = {'TIMESTAMP', 'natural_frequency'}
-    ds = data.mean(dim=[d for d in data.dims if d not in id_cols])
+        return data.mean(dim=_window_dims(data), keep_attrs=True)
+    ds = data.mean(dim=[d for d in data.dims if d not in id_cols], keep_attrs=True)
     return ds
 
 
 def data_integrate_in_frequency(data, f0, freq='natural_frequency'):
     assert freq in data.dims, f'Dim `{freq}` not found in data.'
     ds = data.sel({freq: slice(f0)}
-                  ).sum(dim=freq)
+                  ).sum(dim=freq, keep_attrs=True)
     return ds
 
 
@@ -505,9 +666,19 @@ def _clear_unfinished(output_folderpath, run_time):
                 os.remove(path)
 
 
+def _apply_filter(data, filter_criteria):
+    for var, criteria in filter_criteria.items():
+        if var in data:
+            data[var] = data[var].where(
+                (data[var] >= criteria.start) & (data[var] < criteria.stop))
+        else:
+            logger.warning(f"Trying to filter {var}, but variable not found in data.")
+    return data
+
+
 def _process_period(yl, processing_time_duration, fileduration, input_path, reader,
                     output_folderpath, identifier, run_time, overwrite,
-                    filter_criteria, run_kwargs):
+                    filter_criteria, run_kwargs, store=None):
     """
     Read, decompose, average and save one period of `process`. Returns the
     averaged dataset, or None if the period was skipped or failed.
@@ -538,26 +709,27 @@ def _process_period(yl, processing_time_duration, fileduration, input_path, read
         return None
 
     try:
-        data = _load_data(yl, input_path, reader)
+        if store is None:
+            data = _load_data(yl, input_path, reader)
+        else:
+            data = grid.read_windows(store, yl)
     except Exception as e:
         logger.critical(e)
         raise
 
-    if data is None:
+    if data is None or (store is not None and not data.sizes['TIMESTAMP']):
         _exit(curoutpath_inprog)
         return None
 
     try:
         # main run
-        for var, criteria in filter_criteria.items():
-            if var in data:
-                data[var] = data[var].where(
-                    (data[var] >= criteria.start) & (data[var] < criteria.stop))
-            else:
-                logger.warning(f"Trying to filter {var}, but variable not found in data.")
+        if store is None:
+            data = _apply_filter(data, filter_criteria)
 
         ds_average = data_run(data, sel={'TIMESTAMP': slice(min(yl), max(yl) + datetime.timedelta(minutes=fileduration))},
-                              dst=None, average=True, **run_kwargs)
+                              dst=None, average=True, store=store,
+                              window=int(round(fileduration * 60 * run_kwargs['fs'])),
+                              **run_kwargs)
         if output_path is not None:
             ds_average.to_netcdf(output_path)
         result = ds_average
@@ -578,6 +750,9 @@ def _process_period(yl, processing_time_duration, fileduration, input_path, read
 
     except Exception as e:
         logger.critical(e)
+        # a file left here would make the next run skip this period as done
+        if output_path is not None and result is None and os.path.exists(output_path):
+            os.remove(output_path)
 
     logger.debug(
         f"Date loop ({yl[0].strftime('%Y%m%d-%H%M')}:{yl[-1].strftime('%Y%m%d-%H%M')}) took {round(time.time() - info_t_yl_ymd)} s.")
@@ -620,6 +795,69 @@ def _process_periods_in_parallel(ymd, n_workers, **kwargs):
     return results
 
 
+def _warn_if_mixed_rules(output_folderpath):
+    """
+    Warn when the output folder holds files made with different flux rules.
+
+    It looks at the files after the run, because the rule of a file depends on
+    the data too (no window dim gives same_scale), not only on the arguments.
+    """
+    files = glob.glob(os.path.join(glob.escape(os.path.join(
+        output_folderpath, "wavelet_full_cospectra")), "*.nc"))
+    found = set()
+    for path in files:
+        try:
+            with xr.open_dataset(path) as ds:
+                found.add(ds.attrs.get(FLUX_RULE, SAME_SCALE))
+        except Exception as e:
+            logger.debug(f"Could not read the flux rule of {path}: {e}")
+    if len(found) > 1:
+        logger.warning(
+            "%s holds files made with the %s flux rules: open_files_in_folder "
+            "will refuse to put them together. Use a new output_folderpath.",
+            output_folderpath, ' and '.join(sorted(found)))
+
+
+def _window_means(data, formulas):
+    """What a run on the fixed grid keeps of a file besides its samples."""
+    covariances = {c for f in formulas for c in formula_to_vars(f).combinations}
+    statistics = xr.merge([data_statistics(data, formula=f) for f in covariances])
+    return data_average_dims(xr.merge([data, statistics], compat='override'))
+
+
+def _build_grid_store(ymd, folder, identifier, input_path, reader, fileduration,
+                      filter_criteria, run_kwargs, overwrite, n_jobs):
+    """
+    Decompose the whole run on the fixed grid (see `grid.build_store`). Returns
+    the path of the store, or None if the run can't use the grid.
+    """
+    if run_kwargs['method'] not in ('dwt', 'modwt', 'moda'):
+        logger.info("The fixed grid is for discrete methods: using regular blocks.")
+        return None
+    labels = [t for yl in ymd for t in yl]
+    if not labels:
+        return None
+    fs = run_kwargs['fs']
+    start = min(labels) - datetime.timedelta(minutes=fileduration)
+
+    def read(path):
+        return _apply_filter(reader(path), filter_criteria)
+
+    reason = grid.why_not_on_grid(input_path, read, start, max(labels), fs, fileduration)
+    if reason:
+        logger.warning(f"Using regular blocks instead of the fixed grid: {reason}.")
+        return None
+    formulas = run_kwargs['varstorun']
+    return grid.build_store(
+        folder, identifier, input_path, read,
+        lambda data: _window_means(data, formulas),
+        sorted({var for f in formulas for var in formula_to_vars(f).uniquevars}),
+        start, max(labels), fs, fileduration,
+        run_kwargs.get('level', grid.deepest_level(fs, run_kwargs.get('f0', grid.DEFAULT_F0))),
+        run_kwargs.get('wavelet', cascade.DEFAULT_WAVELET), overwrite, n_jobs,
+        run_kwargs['method'])
+
+
 def process(datetimerange, fileduration, input_path, acquisition_frequency,
             covariance=None, output_folderpath=None, verbosity=1,
             overwrite=False, processing_time_duration="1D",
@@ -628,7 +866,8 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
             integration_period=None,
             identifier=None,
             filter_criteria=None,
-            method="dwt", averaging=30, n_jobs=1, **kwargs):
+            method="dwt", averaging=30, n_jobs=1, fixed_grid=True, cross_level=True,
+            **kwargs):
     """
     Decompose and average the raw files of *datetimerange*, saving one file per
     *processing_time_duration*.
@@ -636,6 +875,22 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     Parameters:
     - n_jobs: periods to process at once (c.f. joblib.Parallel; -1 is one per
       CPU). Each runs in its own process, with a whole period in memory.
+    - fixed_grid: decompose the whole run once on a calendar grid (see grid), so
+      that a period gets the same result however the run is cut and wherever it
+      starts. Memory then follows the period but not the number of levels, and
+      the decomposition is kept in <output_folderpath>/decomposition for the
+      next run of the same period. With method='modwt', which has no grid, it
+      gives each period its neighbours in the same way, and keeps the samples;
+      so with 'moda'. Only for discrete methods and for files that are one
+      window each: anything else uses regular blocks, with a warning. False
+      decomposes each block on its own.
+    - method: 'dwt', 'modwt', 'moda', 'cwt' or 'fcwt' (see universal_wt)
+    - cross_level: split each flux over the levels with the cross-level rule
+      (see data_compute_flux), so that the levels and <x*y>_lf add up to
+      cov_<xy>_filled in each window. For 'dwt' and 'moda', and for files that
+      are windows (an 'ns' dim); 'modwt', 'cwt' and 'fcwt' keep same-scale
+      products. False gives the same-scale products of earlier versions.
+      attrs['flux_rule'] says which rule a result has
 
     Returns:
     - xarray.Dataset with the averaged periods
@@ -653,6 +908,7 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     run_kwargs = {
         'fs': acquisition_frequency,
         'method': method,
+        'cross_level': cross_level,
         # 'averaging': averaging,
         'varstorun': covariance or commons.available_combinations(commons.DEFAULT_COVARIANCE),
         **kwargs.get("run_kwargs", {}),
@@ -687,6 +943,7 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     
     _, _, _f = ymd
     ymd = commons.list_time_in_period(*ymd, processing_time_duration, include='right')
+
     # ymd = {y[-1]: y for y in ymd}
     
     logger.debug(
@@ -707,7 +964,17 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     }
     n_workers = min(joblib.effective_n_jobs(n_jobs), len(ymd))
 
+    temporary = None
     try:
+        if fixed_grid:
+            if output_folderpath is None:
+                folder = temporary = tempfile.mkdtemp(prefix='fluxscale_grid_')
+            else:
+                folder = os.path.join(output_folderpath, 'decomposition')
+            period_kwargs['store'] = _build_grid_store(
+                ymd, folder, identifier, input_path, period_kwargs['reader'],
+                fileduration, filter_criteria, run_kwargs, overwrite,
+                joblib.effective_n_jobs(n_jobs))
         if n_workers > 1:
             ds_collection = _process_periods_in_parallel(ymd, n_workers, **period_kwargs)
         else:
@@ -715,7 +982,11 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     finally:
         if output_folderpath is not None:
             _clear_unfinished(output_folderpath, run_time)
+        if temporary is not None:
+            shutil.rmtree(temporary, ignore_errors=True)
     ds_collection = [ds for ds in ds_collection if ds is not None]
+    if output_folderpath is not None:
+        _warn_if_mixed_rules(output_folderpath)
     
     logger.debug(f'End date loop at {round(time.time() - info_t_start)} s.')
     logger.debug(f"integration_period: {integration_period}.")
@@ -759,34 +1030,18 @@ def process(datetimerange, fileduration, input_path, acquisition_frequency,
     return ds_collection
 
 
-def data_run(data, varstorun, sel=None, average_period='30min', dst=None, average=False, **kwargs):
+def _run_decomposed(data_decomposed, varstorun, sel, average_period, average, kwargs,
+                    cross_level=True, low=True):
     """
-    Main function to decompose, calculate covariance, and average data using xarray.Dataset.
+    Products, conditional sampling and low frequencies of decomposed data.
 
-    Parameters:
-    - data: xarray.Dataset
-    - varstorun: list of formulas to run
-    - sel: dict with keys matching dimensions and values (c.f. xarray.Dataset.sel)
-    - average_period: period for averaging
-    - dst: path to save the result to
-    - average: return the result of data_average_dims. Much faster and lighter than
-      averaging the full result, whose conditional sampling is the bulk of it
-    - output_kwargs: output configuration
-    - meta: metadata dictionary
-    - **kwargs: additional arguments for decompose_data
-
-    Returns:
-    - xarray.Dataset with processed data
+    With *cross_level*, each product of two variables or more is the flux
+    density of data_compute_flux, from the levels and the <var>_signal in
+    *data_decomposed*; the classes take their signs from the same-scale
+    products and their values from that density. *low* adds <x*y>_lf and
+    cov_<xy>_filled (c.f. data_compute_flux). Without a window dim there is
+    no window to split the covariance of, and the products stay same-scale.
     """
-    logger.debug(
-        'Start data_run.')
-    info_t_main = time.time()
-    vars_unique = list(
-        set([var for f in varstorun for var in formula_to_vars(f).uniquevars]))
-    
-    # Decompose all required variables
-    data_decomposed = decompose_variables(
-        data.stack(z=data.dims), vars_unique, nan_tolerance=.3, **kwargs).unstack()
     data_decomposed.attrs.update({
         'averaging': average_period,
         'method': f"{kwargs.get('method', '')} ~{kwargs.get('mother_wavelet', '')}",
@@ -797,16 +1052,26 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, averag
     if sel:
         data_decomposed = data_decomposed.sel(sel)
 
+    # The gap-filled signals are only for the flux: take them out, so that
+    # they do not reach the output with the rest of data_decomposed
+    uniquevars = {v for f in varstorun for v in formula_to_vars(f).uniquevars}
+    helpers = [f'{v}{SIGNAL}' for v in sorted(uniquevars)
+               if f'{v}{SIGNAL}' in data_decomposed.data_vars]
+    signals = data_decomposed[helpers]
+    if helpers:
+        data_decomposed = data_decomposed.drop_vars(helpers)
+
+    window = _window_dims(data_decomposed)
+    if cross_level and not window:
+        logger.warning(
+            "No window dim (only TIMESTAMP): the products stay same-scale, as "
+            "there is no window covariance to split over the levels.")
+        cross_level = False
+
     # Calculate covariance
     info_t_calc_product = time.time()
     uniquecovs = list(
         set([c for f in varstorun for c in formula_to_vars(f).combinations]))
-
-    # Calculate statistics
-    data_stats = [
-        data_statistics(data, formula=f)
-        for f in uniquecovs]
-    data_stats = xr.merge(data_stats)
 
     # Calculate product from formula for each unique covariance
     data_product = [
@@ -814,32 +1079,51 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, averag
         for f in uniquecovs]
     logger.debug(
         f'\tCalculate product from formula took {round(time.time() - info_t_calc_product)} s.')
-    data_product = xr.merge(data_product)
-    data_product = xr.merge([data_decomposed, data_product])
+    # every entry is data_decomposed itself, so there is nothing to compare
+    data_product = xr.merge(data_product, compat='override')
+    data_product = xr.merge([data_decomposed, data_product], compat='override')
+
+    # Cross-level fluxes, from the levels and the gap-filled signals. They are
+    # kept apart from the products until the classes are made, which take
+    # their signs from the same-scale products (data_compute_product keeps a
+    # name already in data, so writing the flux first would change the signs).
+    flux = xr.Dataset()
+    values = None
+    if cross_level:
+        flux_input = data_decomposed.assign(
+            {v: signals[v] for v in signals.data_vars})
+        multi = sorted(c for c in uniquecovs if len(formula_to_vars(c).xy) > 1)
+        flux = xr.merge([data_compute_flux(flux_input, c, average=False, low=low)
+                         for c in multi], compat='override')
+        values = {n: flux[n] for n in (''.join(formula_to_vars(f).xy) for f in varstorun)
+                  if n in flux}
 
     # Calculate conditional sampling
     info_t_calc_cond_samp = time.time()
     if average:
         data_condsamp = data_conditional_sampling_mean(
-            data_product, varstorun,
-            dim=[d for d in data_product.dims if d not in {'TIMESTAMP', 'natural_frequency'}])
+            data_product, varstorun, dim=_window_dims(data_product), values=values)
     else:
         data_condsamp = xr.merge([
-            data_conditional_sampling(data_product, f)
+            data_conditional_sampling(data_product, f, values=values)
             for f in varstorun
         ])
     logger.debug(
         f'\tCalculate conditional sampling took {round(time.time() - info_t_calc_cond_samp)} s.')
 
     # Low-frequency
-    xycovs = list(
-        set(["*".join([f"{c}_lf" for c in formula_to_vars(f).xy]) for f in varstorun]))
-    data_lf = [
-        data_compute_product(data_decomposed, formula=f, name=f.replace('_lf', '') + "_lf")
-        for f in xycovs]
-    logger.debug(
-        f'\tCalculate product from formula took {round(time.time() - info_t_calc_product)} s.')
-    data_lf = xr.merge(data_lf)
+    if cross_level:
+        # data_decomposed carries the plain products and <var>_lf to the output
+        data_lf = data_decomposed.assign({v: flux[v] for v in flux.data_vars})
+    else:
+        xycovs = list(
+            set(["*".join([f"{c}_lf" for c in formula_to_vars(f).xy]) for f in varstorun]))
+        data_lf = [
+            data_compute_product(data_decomposed, formula=f, name=f.replace('_lf', '') + "_lf")
+            for f in xycovs]
+        logger.debug(
+            f'\tCalculate product from formula took {round(time.time() - info_t_calc_product)} s.')
+        data_lf = xr.merge(data_lf)
 
     # Average data
     # data_averaged = data_product.groupby('TIMESTAMP').sum('natural_frequency')
@@ -849,13 +1133,128 @@ def data_run(data, varstorun, sel=None, average_period='30min', dst=None, averag
     # Rename variables
     data_product = data_product.rename(
         {var: f"{var}~" for var in data_product.data_vars})
+    if cross_level:
+        data_product = data_product.assign(
+            {f"{v}~": flux[v] for v in flux.data_vars if f"{v}~" in data_product})
 
     # Merge data
-    response = xr.merge([data, data_stats, data_product, data_lf,
-                        data_condsamp], compat='override')
-    
+    response = xr.merge([data_product, data_lf, data_condsamp], compat='override')
+    for ds in [data_product, data_lf, data_condsamp]:
+        response.attrs.update(ds.attrs)
+    response.attrs[FLUX_RULE] = CROSS_LEVEL if cross_level else SAME_SCALE
+    return response
+
+
+def _run_on_grid(data, store, window, variables, varstorun, sel, average_period, kwargs,
+                 cross_level=True):
+    """_run_decomposed of a period read back from *store*, one level at a time."""
+    block = grid.open_block(store, data.TIMESTAMP.values, window, kwargs.get('method'))
+    low = {var: block.approximation(var) for var in variables}
+    signal = {var: block.signal(var) for var in variables} if cross_level else None
+    levels = [
+        data_average_dims(_run_decomposed(
+            block.decomposed(variables, level, low, signal), varstorun, sel,
+            average_period, True, kwargs, cross_level=cross_level, low=False))
+        for level in block.levels]
+    response = xr.concat(levels, dim='natural_frequency', data_vars='minimal',
+                         coords='minimal', compat='override')
+    response.attrs.update(levels[0].attrs)
+    if response.attrs.get(FLUX_RULE) == CROSS_LEVEL:
+        # the low terms do not depend on the level: once per block
+        dims = ('TIMESTAMP', 'ns')
+        whole = xr.Dataset(
+            {**{f'{v}_lf': (dims, low[v]) for v in variables},
+             **{f'{v}{SIGNAL}': (dims, signal[v]) for v in variables}},
+            coords={'TIMESTAMP': block.timestamps, 'ns': block.ns})
+        if sel:
+            whole = whole.sel(sel)
+        multi = sorted({c for f in varstorun for c in formula_to_vars(f).combinations
+                        if len(formula_to_vars(c).xy) > 1})
+        response = xr.merge(
+            [response] + [data_compute_flux(whole, c, average=True, levels=False)
+                          for c in multi],
+            compat='override', combine_attrs='override')
+    return response
+
+
+def data_run(data, varstorun, sel=None, average_period='30min', dst=None, average=False,
+             store=None, window=None, cross_level=True, **kwargs):
+    """
+    Main function to decompose, calculate covariance, and average data using xarray.Dataset.
+
+    Parameters:
+    - data: xarray.Dataset
+    - varstorun: list of formulas to run
+    - sel: dict with keys matching dimensions and values (c.f. xarray.Dataset.sel)
+    - average_period: period for averaging
+    - dst: path to save the result to
+    - average: return the result of data_average_dims. Much faster and lighter than
+      averaging the full result, whose conditional sampling is the bulk of it.
+      With average=False, the products and <x*y>_lf are per-sample densities,
+      like the levels, and cov_<xy>_filled is a window mean: they add up only
+      after data_average_dims
+    - store: path of a decomposition from grid.build_store to read instead of
+      decomposing *data*, which then is what grid.read_windows gives. Needs
+      average=True
+    - window: samples per window of *data*, with store
+    - cross_level: products of two variables or more are cross-level fluxes
+      (see data_compute_flux), and the classes hold their values. Only for
+      'dwt' and 'moda', whose levels add up to the signal: 'modwt' keeps
+      same-scale products, and so do 'cwt' and 'fcwt' for now, with a warning
+    - output_kwargs: output configuration
+    - meta: metadata dictionary
+    - **kwargs: additional arguments for decompose_data
+
+    Returns:
+    - xarray.Dataset with processed data. attrs['flux_rule'] is 'cross_level'
+      or 'same_scale'
+    """
+    logger.debug(
+        'Start data_run.')
+    info_t_main = time.time()
+    vars_unique = list(
+        set([var for f in varstorun for var in formula_to_vars(f).uniquevars]))
+
+    if store is not None and not average:
+        raise ValueError("data_run with a store needs average=True.")
+
+    method = kwargs.get('method', 'dwt')
+    if cross_level and method in ('cwt', 'fcwt'):
+        logger.warning(
+            "UserWarning: The cross-level flux is not available for %s yet: "
+            "products stay same-scale.", method)
+        cross_level = False
+    elif cross_level and method not in CROSS_LEVEL_METHODS:
+        logger.info(
+            "The levels of %s do not add up to the signal: products stay "
+            "same-scale (use 'moda' for the cross-level flux).", method)
+        cross_level = False
+
+    # Decompose all required variables
+    if store is None:
+        results = _run_decomposed(
+            decompose_variables(
+                data.stack(z=data.dims), vars_unique, nan_tolerance=.3,
+                keep_signal=cross_level, **kwargs).unstack(),
+            varstorun, sel, average_period, average, kwargs, cross_level=cross_level)
+
+        # Calculate statistics
+        uniquecovs = list(
+            set([c for f in varstorun for c in formula_to_vars(f).combinations]))
+        data_stats = [
+            data_statistics(data, formula=f)
+            for f in uniquecovs]
+        data_stats = xr.merge(data_stats)
+    else:
+        results = _run_on_grid(data, store, window, vars_unique, varstorun, sel,
+                               average_period, kwargs, cross_level=cross_level)
+        data_stats = xr.Dataset()   # data has them already
+
+    # Merge data
+    response = xr.merge([data, data_stats, results], compat='override')
+
     # Merge attrs
-    for ds in [data, data_stats, data_product, data_lf, data_condsamp]:
+    for ds in [data, data_stats, results]:
         response.attrs.update(ds.attrs)
 
     if average:
