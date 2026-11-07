@@ -6,6 +6,7 @@ de-duplication, conditional sampling, the DWT forward/inverse round-trip, and
 the conditional-sampling partition wiring (distinct output suffixes, list/None
 inputs). Continuous-wavelet paths are skipped when ``pycwt`` is unavailable.
 """
+import dask
 import numpy as np
 import pandas as pd
 import pytest
@@ -297,3 +298,110 @@ def test_partition_dwcs_co_handles_list_and_none_inputs():
         assert base in out.data_vars
     # with NIGHT=None, islight is 1 everywhere -> GPP is not forced to zero
     assert np.isfinite(out["GPP"].values).all()
+
+
+# --------------------------------------------------------------------------- #
+# open_files_in_folder: same result as the former lazy open_mfdataset reader
+# --------------------------------------------------------------------------- #
+def _write_cospectra_folder(folder, heterogeneous=False):
+    """Small per-period files; sorted filename order differs from time order."""
+    rng = np.random.default_rng(3)
+    starts = {"b_202001010000.nc": "2020-01-01 00:30",   # earliest times, sorts 2nd
+              "a_202001010300.nc": "2020-01-01 03:30",
+              "c_202001010600.nc": "2020-01-01 06:30"}
+    for i, (name, start) in enumerate(starts.items()):
+        t = pd.date_range(start, periods=6, freq="30min")
+        f = [10.0, 5.0, 2.5] + ([1.25] if heterogeneous and i == 1 else [])
+        ds = xr.Dataset(
+            {"wco2~": (("natural_frequency", "TIMESTAMP"),
+                       rng.standard_normal((len(f), 6))),
+             "wco2_lf": ("TIMESTAMP", rng.standard_normal(6))},
+            coords={"natural_frequency": f, "TIMESTAMP": t},
+            attrs={"method": "dwt", "dt": np.nan, "run": i})
+        if heterogeneous:
+            ds["weight"] = ("natural_frequency", np.arange(len(f), dtype=float))
+            ds = ds.assign_coords(site="ES-LMa", block=i)
+            if i == 2:
+                ds = ds.drop_vars("wco2_lf")
+        ds.to_netcdf(folder / name)
+
+
+@pytest.mark.parametrize("heterogeneous", [False, True])
+@pytest.mark.parametrize("load", [None, True, False])
+def test_open_files_in_folder_matches_former_reader(tmp_path, load, heterogeneous):
+    _write_cospectra_folder(tmp_path, heterogeneous)
+    with xr.open_mfdataset(  # former reader, with xarray's then-default merge rules
+            str(tmp_path / "*.nc"), combine="nested", concat_dim="TIMESTAMP",
+            data_vars="all", coords="different", compat="no_conflicts",
+            join="outer") as ref:
+        ref = ref.load()
+    out = handlers.open_files_in_folder(str(tmp_path), load=load)
+    try:
+        xr.testing.assert_identical(out, ref)
+        assert list(out.variables) == list(ref.variables)
+        assert out.TIMESTAMP.encoding["units"] == ref.TIMESTAMP.encoding["units"]
+        # concatenated in sorted filename order (a, b, c), not in time order
+        assert out.TIMESTAMP.values[0] == np.datetime64("2020-01-01T03:30")
+        chunks = out["wco2~"].chunks
+        if load is False:
+            assert len(chunks[out["wco2~"].dims.index("TIMESTAMP")]) == 1
+        else:
+            assert chunks is None
+    finally:
+        out.close()
+
+
+def test_open_files_in_folder_chunks_loaded_result(tmp_path):
+    _write_cospectra_folder(tmp_path)
+    out = handlers.open_files_in_folder(str(tmp_path), chunks={"TIMESTAMP": 5})
+    assert out["wco2_lf"].chunks == ((5, 5, 5, 3),)
+
+
+def test_open_files_in_folder_without_files_raises(tmp_path):
+    with pytest.raises(OSError, match="no files to open"):
+        handlers.open_files_in_folder(str(tmp_path))
+
+
+def test_open_files_in_folder_opens_large_folders_lazily(
+        tmp_path, monkeypatch, caplog):
+    _write_cospectra_folder(tmp_path)
+    monkeypatch.setattr(handlers, "LOAD_LIMIT", 1)
+    with caplog.at_level("WARNING", logger=handlers.logger.name):
+        out = handlers.open_files_in_folder(str(tmp_path))
+    try:
+        assert out["wco2~"].chunks is not None
+        assert "opening them lazily" in caplog.text
+    finally:
+        out.close()
+
+
+def test_open_files_in_folder_load_overrides_the_limit(tmp_path, monkeypatch):
+    _write_cospectra_folder(tmp_path)
+    monkeypatch.setattr(handlers, "LOAD_LIMIT", 1)
+    out = handlers.open_files_in_folder(str(tmp_path), load=True)
+    assert out["wco2~"].chunks is None
+
+
+def test_open_files_in_folder_lazy_chunks_keep_to_the_dask_limit(tmp_path):
+    _write_cospectra_folder(tmp_path)
+    with dask.config.set({"array.chunk-size": "128B"}):
+        out = handlers.open_files_in_folder(str(tmp_path), load=False)
+    try:
+        data = out["wco2~"].data
+        assert data.npartitions > 1
+        assert data.blocks[0, 0].nbytes <= 128
+    finally:
+        out.close()
+
+
+def test_open_files_in_folder_lazy_open_keeps_text_variables(tmp_path):
+    for i, site in enumerate(["ES-LMa", "FR-Gri"]):
+        t = pd.date_range(f"2020-01-0{i + 1}", periods=4, freq="30min")
+        xr.Dataset({"x": ("TIMESTAMP", np.arange(4.0)),
+                    "site": ("TIMESTAMP", [site] * 4)},
+                   coords={"TIMESTAMP": t}).to_netcdf(tmp_path / f"{i}.nc")
+    out = handlers.open_files_in_folder(str(tmp_path), load=False)
+    try:
+        assert out["site"].values[[0, -1]].tolist() == ["ES-LMa", "FR-Gri"]
+    finally:
+        out.close()

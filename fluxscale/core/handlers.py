@@ -41,6 +41,8 @@ import datetime
 import glob
 
 # 3rd party modules
+import dask
+from dask.utils import parse_bytes
 import numpy as np
 import xarray as xr
 
@@ -329,10 +331,68 @@ def data_partition(data, dst=None,
     return xr.merge([data, ds_pH2O, ds_pH2O_CO, ds_pCO, ds_pCH4], compat='override')
 
 
-def open_files_in_folder(path):
-    ds = xr.open_mfdataset(
-        os.path.join(path, '*.nc'), combine='nested', concat_dim='TIMESTAMP')
-    return ds
+# Folders whose files add up to more than this are opened lazily by default.
+LOAD_LIMIT = 2**30
+
+
+def open_files_in_folder(path, load=None, chunks=None):
+    """Open the ``*.nc`` files in *path* as one Dataset along ``TIMESTAMP``.
+
+    Files are concatenated in sorted filename order with the merge rules of
+    ``xr.open_mfdataset(..., combine='nested', concat_dim='TIMESTAMP')``,
+    pinned so the result does not depend on xarray's changing defaults.
+
+    Args:
+        path: Folder of per-period NetCDF outputs, e.g.
+            ``<output>/wavelet_full_cospectra``.
+        load: If True, read each file into memory, then concatenate. For many
+            small files this is much faster than a lazy open, which builds one
+            dask chunk per file and variable, but peak RAM is a few times the
+            size of the files. If False, open lazily with dask, for folders
+            that do not fit in memory (slow with thousands of files); peak RAM
+            then follows the chunk size and the number of dask threads, not
+            the size of the folder. If None (default), read into memory unless
+            the files add up to more than ``LOAD_LIMIT`` bytes.
+        chunks: Dask chunks for the result, e.g. ``{'TIMESTAMP': 4096}``. If
+            None, the result is in memory or, when it is opened lazily, has
+            chunks of about dask's ``array.chunk-size`` along ``TIMESTAMP``.
+
+    Returns:
+        xarray.Dataset
+
+    Raises:
+        OSError: If *path* has no ``*.nc`` file.
+    """
+    files = sorted(glob.glob(os.path.join(
+        os.path.abspath(os.path.expanduser(path)), '*.nc')))
+    if not files:
+        raise OSError(f"no files to open in {path!r}")
+    combine_kwargs = dict(
+        concat_dim='TIMESTAMP', data_vars='all', coords='different',
+        compat='no_conflicts', join='outer', combine_attrs='override')
+    if load is None:
+        nbytes = sum(os.path.getsize(f) for f in files)
+        load = nbytes <= LOAD_LIMIT
+        if not load:
+            logger.warning(
+                "%d files (%.1f GiB): opening them lazily, which is slower. "
+                "Use load=True to read them into memory; peak RAM is a few "
+                "times their size.", len(files), nbytes / 2**30)
+    if load:
+        ds = xr.combine_nested(
+            [xr.load_dataset(f) for f in files], **combine_kwargs)
+        return ds if chunks is None else ds.chunk(chunks)
+    ds = xr.open_mfdataset(files, combine='nested', **combine_kwargs)
+    if chunks is None:
+        # Small files merge into few chunks and large ones split, so the chunks
+        # do not grow with the folder. Not 'auto', which refuses text variables.
+        step = max(v.nbytes // v.sizes['TIMESTAMP']
+                   for v in ds.variables.values() if 'TIMESTAMP' in v.dims)
+        limit = parse_bytes(dask.config.get('array.chunk-size'))
+        chunks = {'TIMESTAMP': max(1, limit // step)}
+    out = ds.chunk(chunks)
+    out.set_close(ds.close)  # chunk() drops the closer of the open files
+    return out
 
 
 def data_average_dims(data, id_cols=None):

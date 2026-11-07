@@ -7,6 +7,19 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Changed
+
+- `fluxscale.core.handlers.open_files_in_folder` now reads the files into memory
+  and concatenates them, instead of always opening them lazily with
+  `xr.open_mfdataset`, which made one dask chunk per file and variable and was
+  very slow for folders of many small files: a year of daily files takes seconds
+  instead of minutes. The result is identical (same variables, dims, attrs;
+  sorted filename order) but numpy-backed. Folders of more than `LOAD_LIMIT`
+  (1 GiB) of files are still opened lazily, with a warning; `load=True` or
+  `load=False` forces either way, and `chunks=` sets the dask chunks of either
+  result. The merge rules are now pinned, so the result no longer depends on
+  xarray's defaults.
+
 ## [0.6.0] - 2026-11-06
 
 ### Added
