@@ -6,7 +6,7 @@ Python.
 import numpy as np
 import xarray as xr
 
-from .sonification import _decompose, _load
+from .sonification import wavelet_bands, load
 
 __all__ = ["decompose"]
 
@@ -27,12 +27,12 @@ def decompose(data, variable=None, fs=None, wavelet="db6"):
         part of the variance, or of the covariance for a product (it can be
         negative). ``signal`` is the sum of ``scales`` and ``trend``.
     """
-    source = _load(data, variable, fs, wavelet)
+    source = load(data, variable, fs, wavelet)
     product = "parts" in source
     if "bands" in source:
         bands, freqs = source["bands"], source["freqs"]
     else:
-        bands, freqs = _decompose(source["values"], source["fs"], wavelet)
+        bands, freqs = wavelet_bands(source["values"], source["fs"], wavelet)
     values = source["values"]
     trend = values - bands.sum(axis=0)
     weights = bands.mean(axis=1) if product else bands.var(axis=1)

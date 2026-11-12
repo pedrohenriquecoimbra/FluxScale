@@ -7,6 +7,25 @@ breaking changes bump the minor version).
 
 ## [Unreleased]
 
+### Moved to FluxSound
+
+- **Music and MIDI moved to [FluxSound](https://github.com/pedrohenriquecoimbra/FluxSound)**
+  (`pip install fluxsound`): level 2 of `sonify`, `INSTRUMENTS`, `SCALES`,
+  `export_midi` and `PROGRAMS`. FluxScale keeps level 0 (audio file) and level 1
+  (audible), loudness mastering and `write_wav`. The sound is unchanged: the
+  same call gives the same samples and the same MIDI file.
+- **Breaking:** `sonify(level=2)` and its `scale`, `root`, `instruments` and
+  `correlation_window` arguments, `fluxscale.export_midi`, `fluxscale.extra.midi`,
+  the `midi` extra, and `-l 2` and `.mid` output of `fluxscale-sonify` are gone.
+  Use `fluxsound.sonify`, `fluxsound.export_midi` and the `fluxsound` command,
+  which take the same arguments.
+- **`sonify` and `fluxscale-sonify` default to level 1** instead of 2.
+- `fluxscale.extra.sonification` makes public what the music is built on:
+  `load`, `wavelet_bands`, `band_names`, `master`, `as_sound`, and the hearing
+  and control curves (`erb_rate`, `erb_spaced`, `equal_loudness_gain`,
+  `typical_level`, `equalised`, `to_control`, `rms_curve`, `presence`,
+  `pan_gains`).
+
 ### Added
 
 - `fluxscale gui`: a page to load EddyPro raw datasets (level 6), decompose

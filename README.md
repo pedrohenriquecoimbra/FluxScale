@@ -237,47 +237,31 @@ Prefer using ```fluxscale.data_run```? No problem! Pass the ```dst``` parameter 
 
 ### Listening to the Data
 
-Any variable can be turned into sound with ```fluxscale.sonify```, at one of three levels. This part of the library is experimental: its API may still change.
+Any variable can be turned into sound with ```fluxscale.sonify```, at one of two levels. This part of the library is experimental: its API may still change.
 
 | Level | | What it does |
 | --- | --- | --- |
 | 0 | Audio file | The signal itself, written as audio: one data sample per audio sample. |
-| 1 | Audible | The same signal altered for human hearing: its wavelet scales are expanded into the hearing range, equalised and weighted for equal loudness. Every sound is still a piece of the data. |
-| 2 | Music (default) | Each wavelet scale drives a voice on a consonant scale, and the value of the variable plays a melody over it. A flux is a duet. |
+| 1 | Audible (default) | The same signal altered for human hearing: its wavelet scales are expanded into the hearing range, equalised and weighted for equal loudness. Every sound is still a piece of the data. |
+
+A third level, music, is in [FluxSound](https://github.com/pedrohenriquecoimbra/FluxSound): instruments, a flux played as a duet, MIDI export and web apps, all built on the two levels here.
 
 ```python
 import fluxscale
 
 fluxscale.sonify(data, "co2", level=0, dst="co2_L0.wav")
-fluxscale.sonify(data, "co2", level=1, dst="co2_L1.wav")
-fluxscale.sonify(data, "co2", dst="co2_L2.wav")
+fluxscale.sonify(data, "co2", dst="co2_L1.wav")
 fluxscale.sonify(data, "w*co2", duration=60, dst="flux.wav")
-fluxscale.sonify(data, "w*co2", instruments=("cello", "marimba"), dst="flux.wav")
 
 stems = fluxscale.sonify(data, "co2", stems=True)    # one track per wavelet scale, summing to the mix
 split = fluxscale.decompose(data, "w*co2", fs=20)    # the scales themselves, as a Dataset
-fluxscale.export_midi(data, "w*co2", "flux.mid")     # the same music for a DAW (pip install "fluxscale[midi]")
 ```
 
 ```data``` can be an array, a ```pandas.Series``` or an ```xarray.DataArray```, or a Dataset, DataFrame or dictionary holding the variable. Products such as ```"w*co2"``` and wavelet-domain outputs of ```data_run``` such as ```"wco2-wh2o+"``` work too. A product such as ```"w*co2"``` is played as the same-scale product of its levels, which is not the cross-level ```wco2``` of ```data_run``` (see What a flux at one scale is).
 
 Why level 1 is needed: speed and pitch are tied together in a waveform. Playing half an hour of the FR-Gri sample in 30 s leaves only 3% (```h2o```) to 46% (```w```) of its variance audible. Wavelets untie them, so that scales can be moved into the hearing range without changing how fast time runs.
 
-A flux is the covariance between two variables, so at level 2 it is played by two instruments, one per variable, each following its own value. What you hear between them is the flux:
-
-| You hear | It means |
-| --- | --- |
-| Two instruments (flute and bell by default) | The first and the second variable (e.g. ```w``` and ```co2```) |
-| Moving together, or in opposite directions | Positive or negative covariance |
-| Sweet intervals, or looser ones with seconds and sevenths | Strong local correlation, or none |
-| Voices swelling underneath | The flux at each wavelet scale, low notes for large eddies |
-| Lowest note: major or relative minor | Upward or downward flux |
-
-For a day of ```w*co2``` at FR-Gri, the instruments drift apart at night, then lock into consonant contrary motion in a minor key from mid-morning to late afternoon, as photosynthesis takes CO2 down.
-
-Instruments are chosen by name from ```fluxscale.extra.sonification.INSTRUMENTS```, one per variable: held ones (flute, clarinet, oboe, bassoon, saxophone, horn, trumpet, trombone, violin, viola, cello, double_bass, voice, organ, accordion) and struck or plucked ones (bell, piano, harp, harpsichord, guitar, electric_guitar, bass_guitar, pizzicato, marimba, vibraphone, glockenspiel, celesta, timpani, kalimba). They are simple synthesised sketches, not recordings. In a duet, one of each kind is easiest to tell apart.
-
-Gaps in the data are silent. Over a long record, calm passages stay softer than turbulent ones, but by no more than ```loudness_range``` (6 LU by default, ```None``` keeps the full swing), so that a quiet night remains audible. The same data and seed always give the same sound. Other options are ```duration```, ```scale```, ```root```, ```loudness``` and ```seed``` (see ```help(fluxscale.sonify)```); the result is an ```xarray.DataArray``` whose ```attrs``` record the mapping. In a notebook:
+Gaps in the data are silent. Over a long record, calm passages stay softer than turbulent ones, but by no more than ```loudness_range``` (6 LU by default, ```None``` keeps the full swing), so that a quiet night remains audible. The same data and seed always give the same sound. Other options are ```duration```, ```loudness``` and ```seed``` (see ```help(fluxscale.sonify)```); the result is an ```xarray.DataArray``` whose ```attrs``` record the mapping. In a notebook:
 
 ```python
 from IPython.display import Audio
@@ -290,32 +274,11 @@ Or from the command line:
 
 ```bash
 fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
-fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.mid
 ```
 
-#### Working in a DAW
+Until version 0.7 the music was here. ```sonify(level=2)```, its ```scale```, ```root```, ```instruments``` and ```correlation_window``` arguments, ```export_midi``` and ```.mid``` output on the command line are now ```fluxsound.sonify```, ```fluxsound.export_midi``` and the ```fluxsound``` command (```pip install fluxsound```), with the same arguments and the same sound. Level 1 is the default here.
 
-The instruments are simple sketches. For real ones, take the L2 composition to Reaper, Ableton or MuseScore as MIDI, with the stems as a reference (```pip install "fluxscale[midi]"```):
-
-```python
-from fluxscale.extra.sonification import write_wav
-
-kwargs = dict(duration=30, scale="pentatonic", instruments=("cello", "marimba"))
-
-fluxscale.export_midi(data, "w*co2", "daw/flux.mid", **kwargs)
-stems = fluxscale.sonify(data, "w*co2", stems=True, **kwargs)
-for name in stems.stem.values:
-    write_wav(stems.sel(stem=name), f"daw/{name.replace(':', '')}.wav")
-```
-
-Tracks and stems have the same names and, with the same arguments, the same notes: one per wavelet scale (```0.078125 Hz```), the ```bass``` of a duet, and one per melody line (```line: co2```). Each line carries the General MIDI program of its instrument, a starting point for loading your own.
-
-- **Lines** are the notes of the audio, with velocities from the activity of the variable.
-- **Scales** stay on the note of their voice. A note sounds whenever the energy at that scale has moved, so the velocities trace it: a steady scale is one long note.
-- **Time.** A melody slot is an eighth note, which makes 90 BPM unless the record has few samples, and the file carries its tempo. Import it when asked, keep the tracks separate, and place everything at the start of the project: tracks and stems then stay in time.
-- **Not in the file.** Keys are equal-tempered, so the pure ratios of the audio become the nearest key. Pan, room and mastering stay in the stems.
-
-Web apps built on this are in [FluxSound](https://github.com/pedrohenriquecoimbra/FluxSound).
+For other tools that compose with the scales, ```fluxscale.extra.sonification``` makes public what the music is built on: ```load``` and ```wavelet_bands``` (a variable or a product as wavelet bands), the hearing curves (```erb_spaced```, ```equal_loudness_gain```, ```equalised```), ```master``` (loudness and peaks), ```as_sound``` and ```write_wav```.
 
 
 ### Output Format

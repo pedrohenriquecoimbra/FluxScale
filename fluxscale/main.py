@@ -9,7 +9,6 @@ import glob
 import xarray as xr
 # Project modules
 from .extra import eddypro as eddypro
-from .extra import midi as sound_midi
 from .extra import sonification
 from .core import handlers
 from .io import READERS
@@ -329,20 +328,27 @@ def partition():
     return
 
 
-def sonify():
-    # fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o flux.wav
+def sonify(default_level=1, to_sound=sonification.sonify, to_midi=None):
+    """Command line of ``sonify``.
+
+    FluxSound runs it as ``fluxsound``, with its own functions: *to_midi* adds
+    level 2 (music) and MIDI output, and music becomes the default.
+    """
+    # fluxscale-sonify -i "output/eddypro_raw_datasets/level_6/20220513-12*" -v "w*co2" -o co2.wav
     parser = argparse.ArgumentParser(
-        description="Turn a variable into sound, or into MIDI if the output ends in .mid. "
-                    "Other `sonify` or `export_midi` arguments can be passed as `--key value` "
-                    "(e.g. `--instruments cello marimba`).")
+        description="Turn a variable into sound" + (
+            ", or into MIDI if the output ends in .mid. " if to_midi else ". ")
+        + "Other arguments of `sonify` can be passed as `--key value` (e.g. `--seed 3`).")
     parser.add_argument('-i', '--input_path', type=str, nargs='+', required=True,
                         help='Input file(s), in time order; patterns such as "level_6/20220513*" are expanded')
     parser.add_argument('-v', '--variable', type=str, required=True,
                         help='Variable, or a product played as a duet (e.g., "co2", "w*co2")')
     parser.add_argument('-o', '--output', type=str, required=True,
-                        help='Path of the .wav or .mid file to write')
-    parser.add_argument('-l', '--level', type=int, default=2, choices=[0, 1, 2],
-                        help='0 audio file, 1 audible, 2 music (default: 2)')
+                        help='Path of the .wav file to write' + (', or .mid' if to_midi else ''))
+    parser.add_argument('-l', '--level', type=int, default=None,
+                        choices=[0, 1, 2] if to_midi else [0, 1],
+                        help='0 audio file, 1 audible' + (', 2 music' if to_midi else '')
+                        + f' (default: {default_level})')
     parser.add_argument('-d', '--duration', type=float, default=None,
                         help='Seconds of sound (default: 30; at level 0, one audio sample per data sample)')
     parser.add_argument('-af', '--acquisition_frequency', type=float, default=None,
@@ -352,7 +358,9 @@ def sonify():
     _add_common_args(parser)
     args, custom_params = _finalize(parser)
     midi = args.output.lower().endswith(('.mid', '.midi'))
-    if midi and args.level != 2:
+    if midi and to_midi is None:
+        parser.error("MIDI and music are in FluxSound: use its `fluxsound` command.")
+    if midi and args.level not in (None, 2):
         parser.error("MIDI holds the notes of level 2: drop --level or write a .wav file.")
 
     paths = sorted(p for pattern in args.input_path for p in glob.glob(pattern))
@@ -360,11 +368,12 @@ def sonify():
         raise FileNotFoundError(f"No file matches {args.input_path}.")
     data = xr.concat([READERS.get(args.reader)(p) for p in paths], dim='TIMESTAMP')
     if midi:
-        sound_midi.export_midi(data, args.variable, args.output, duration=args.duration,
-                               fs=args.acquisition_frequency, **custom_params)
+        to_midi(data, args.variable, args.output, duration=args.duration,
+                fs=args.acquisition_frequency, **custom_params)
     else:
-        sonification.sonify(data, args.variable, level=args.level, duration=args.duration,
-                            fs=args.acquisition_frequency, dst=args.output, **custom_params)
+        level = default_level if args.level is None else args.level
+        to_sound(data, args.variable, level=level, duration=args.duration,
+                 fs=args.acquisition_frequency, dst=args.output, **custom_params)
 
 
 def run():
