@@ -13,3 +13,4 @@ sample/**/output/eddypro_raw_datasets/level_6/*.txt
 sample/*/output/wavelet_flux*
 sample/*/output/history/*
 sample/*/test*
+_site/

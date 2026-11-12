@@ -62,6 +62,18 @@ Then one of the following options:
     python -m fluxscale.main [-args...]
     ```
 
+### In a page, without code
+
+```bash
+fluxscale gui
+```
+
+opens a page in your browser, served from your computer: load the level 6 raw
+datasets, decompose them, then choose any covariance and conditional sampling,
+and see NEE, GPP and Reco by window and by scale. `fluxscale gui -i PATH/TO/level_6`
+starts on a folder. The same page runs [online](https://pedrohenriquecoimbra.github.io/wavelet-ec/),
+inside the browser, for a few hours of data. See [docs/WEB_TOOL.md](docs/WEB_TOOL.md).
+
 ### Running _fluxscale_
 
 This requires ```pip install fluxscale```.

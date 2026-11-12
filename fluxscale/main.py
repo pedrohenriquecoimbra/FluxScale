@@ -1,5 +1,6 @@
 # standard modules
 import os
+import sys
 import logging
 import datetime
 import argparse
@@ -397,6 +398,11 @@ def run():
 
 
 def main():
+    # fluxscale gui [-i FOLDER]: the page, instead of a run
+    if len(sys.argv) > 1 and sys.argv[1] == 'gui':
+        from .gui import cli
+        return cli(sys.argv[2:])
+
     parser = argparse.ArgumentParser(
         description="Run wavelet-based edy covariance workflows.")
     parser.add_argument('-dr', '--datetimerange', type=str,

@@ -63,6 +63,7 @@ Homepage = "https://github.com/pedrohenriquecoimbra/wavelet-ec"
 
 [tool.setuptools]
 packages.find = { where = ["."], include = ["fluxscale*"], exclude = ["sample*", "deprecated*"], namespaces = false }
+package-data = { "fluxscale.gui" = ["web/*"] }
 # exclude-package-data = { "fluxscale" = ["sample*", "deprecated*"] }
 # include-package-data = true
 

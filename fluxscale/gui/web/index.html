@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>FluxScale: wavelet eddy covariance in your browser</title>
+  <meta name="description" content="Load EddyPro raw datasets (level 6), decompose them with wavelets and look at any covariance, its conditional sampling, and NEE, GPP and Reco.">
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <aside class="panel">
+    <header>
+      <h1>FluxScale</h1>
+      <p>Load EddyPro raw datasets, decompose them with wavelets and look at any covariance by scale, with the
+        <a href="https://github.com/pedrohenriquecoimbra/wavelet-ec" target="_blank" rel="noopener">fluxscale</a>
+        package. <span id="where"></span></p>
+    </header>
+
+    <section class="block">
+      <h2>1. Raw data</h2>
+      <label class="drop" id="drop">
+        <strong>Choose or drop files</strong>
+        <span>EddyPro raw datasets, level 6, named like 20220514-1200_raw_dataset_….txt. Any number, in any order.</span>
+        <input type="file" id="files" multiple accept=".txt,text/plain">
+      </label>
+      <button type="button" id="sample" class="link" hidden>Or try three hours at FR-Gri</button>
+      <p class="hint" id="found" hidden></p>
+      <ul id="checks" class="notes" hidden></ul>
+      <details id="listing" class="hint" hidden>
+        <summary>Files in time order</summary>
+        <ol id="order"></ol>
+      </details>
+    </section>
+
+    <form id="form" class="block" hidden>
+      <h2>2. Covariances</h2>
+      <div class="chips" id="formulas" aria-label="Covariances to compute"></div>
+      <fieldset>
+        <legend>Add a covariance</legend>
+        <div class="adder">
+          <select id="cov-x" aria-label="First variable"></select>
+          <span>with</span>
+          <select id="cov-y" aria-label="Second variable"></select>
+          <button type="button" id="add-cov" class="secondary">Add</button>
+        </div>
+      </fieldset>
+      <fieldset>
+        <legend>Add a conditional sampling</legend>
+        <div class="adder">
+          <select id="cs-of" aria-label="Covariance to sample"></select>
+          <span>by</span>
+          <select id="cs-by" aria-label="Covariance whose sign makes the classes"></select>
+          <button type="button" id="add-cs" class="secondary">Add</button>
+        </div>
+        <p class="hint">Sampling w*co2 by w*h2o gives NEE, GPP and Reco.</p>
+      </fieldset>
+
+      <details id="advanced">
+        <summary>Settings</summary>
+        <div class="row">
+          <label>Sampling rate, Hz <input type="number" id="fs" min="0.1" max="100" step="any" required></label>
+          <label>Minutes per file <input type="number" id="duration" min="1" max="1440" step="1" required></label>
+        </div>
+        <div class="row">
+          <label>Method
+            <select id="method">
+              <option value="dwt">DWT</option>
+              <option value="moda">MODWT details</option>
+            </select>
+          </label>
+          <label>Integrate up to, min <input type="number" id="integration" min="1" max="1440" step="any" required></label>
+        </div>
+        <p class="hint">A flux is the sum of its scales shorter than the integration period.</p>
+      </details>
+
+      <button type="submit" id="run" class="primary">Decompose and compute</button>
+      <p class="hint" id="reuse" hidden></p>
+    </form>
+
+    <div id="progress" class="progress" hidden>
+      <p id="status" role="status"></p>
+      <div class="bar"><div id="fill"></div></div>
+    </div>
+    <p id="message" class="message" role="alert" hidden></p>
+
+    <section id="results" class="block" hidden>
+      <h2>3. Result</h2>
+      <dl id="stats"></dl>
+      <ul id="notes" class="notes"></ul>
+      <h3>Download</h3>
+      <div class="chips" id="downloads">
+        <button type="button" data-kind="csv">Fluxes, CSV</button>
+        <button type="button" data-kind="netcdf">With cospectra, NetCDF</button>
+      </div>
+      <h3>Cite</h3>
+      <p class="cite">Coimbra, P. H. H., Loubet, B., Laurent, O., Mauder, M., Heinesch, B., Bitton, J., Delpierre, N.,
+        Berveiller, D., Depuydt, J., Buysse, P. (2025). Evaluation of a novel approach to partitioning respiration and
+        photosynthesis using eddy covariance, wavelets and conditional sampling. Agric. For. Meteorol.
+        <a href="https://doi.org/10.1016/j.agrformet.2025.110684" target="_blank" rel="noopener">doi:10.1016/j.agrformet.2025.110684</a></p>
+    </section>
+
+    <footer id="foot"></footer>
+  </aside>
+
+  <main class="stage" id="stage">
+    <div class="empty" id="empty">
+      <h2>From raw data to fluxes by scale</h2>
+      <ol>
+        <li>In EddyPro, save the processed raw data: Advanced Settings, Output Files, Processed raw data, time series
+          on “level 6 (after time lag compensation)”, all variables.</li>
+        <li>Load those files here. They are put in time order from their names.</li>
+        <li>Choose covariances and conditional samplings, for example w*co2 sampled by w*h2o for NEE, GPP and Reco.</li>
+      </ol>
+      <p id="privacy"></p>
+    </div>
+
+    <div class="views" id="views" hidden>
+      <label>Show <select id="view"></select></label>
+      <div class="legend" id="legend"></div>
+    </div>
+
+    <section class="chart" id="time-card" hidden>
+      <header><h2 id="time-title"></h2><p id="time-note"></p></header>
+      <div class="plot" id="time-plot"></div>
+    </section>
+
+    <div class="pair" id="scale-row" hidden>
+      <section class="chart">
+        <header><h2 id="scale-title"></h2>
+          <p><span id="scale-note"></span> <button type="button" class="link" id="all-windows" hidden>Show the mean of all windows</button></p></header>
+        <div class="plot" id="scale-plot"></div>
+      </section>
+      <section class="chart">
+        <header><h2 id="map-title"></h2><p id="map-note"></p></header>
+        <div class="plot" id="map-plot"></div>
+      </section>
+    </div>
+
+    <details class="table" id="table-card" hidden>
+      <summary>Values as a table</summary>
+      <div class="scroll"><table id="table"></table></div>
+    </details>
+    <p class="units" id="units" hidden></p>
+    <div class="tip" id="tip" hidden></div>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

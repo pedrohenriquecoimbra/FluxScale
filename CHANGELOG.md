@@ -9,6 +9,11 @@ breaking changes bump the minor version).
 
 ### Added
 
+- `fluxscale gui`: a page to load EddyPro raw datasets (level 6), decompose
+  them and look at any covariance, its conditional sampling, and NEE, GPP and
+  Reco, by window and by scale. `-i FOLDER` opens it on a folder. The same page
+  is built for GitHub Pages by `scripts/build_site.py`, where it runs fluxscale
+  inside the browser. See `docs/WEB_TOOL.md` and `fluxscale.gui.tool`.
 - `process(n_jobs=...)` (`-j`/`--n_jobs` on the command line) processes several
   periods at once in worker processes, through the new `joblib` dependency. The
   result is the same as one at a time, the default. Each worker holds a whole
